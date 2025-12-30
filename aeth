@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 
-# Use absolute paths to avoid issues when launching from different terminals
-AETH_HOME="$HOME/Aeth"
+# 1. Get the absolute path of the directory where THIS script is located
+# This handles cases where you move the whole Aeth folder.
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+# 2. Define relative paths based on that directory
+AETH_HOME="$SCRIPT_DIR"
 AETH_CONFIG_DIR="$HOME/.config/Aeth"
 
-# Ensure the config directory exists before launching
+# 3. Locate the binary using the folder structure we saw in your 'tree' output
+# We use a wildcard (*) for the GHC version in case you update your compiler
+BINARY=$(find "$AETH_HOME/dist-newstyle/build" -type f -name "Aeth" -path "*/x/Aeth/build/Aeth/Aeth" | head -n 1)
+
+# Ensure the config directory exists
 mkdir -p "$AETH_CONFIG_DIR"
 
-# Navigate to project and exec
-# Using 'exec' replaces the bash process with the Cabal process, 
-# which is cleaner for a shell launcher.
-cabal --project-dir="$AETH_HOME" run Aeth -- "$@"
+# 4. Execute or Fail
+if [ -n "$BINARY" ] && [ -f "$BINARY" ]; then
+    # exec replaces the bash process with the Aeth binary
+    exec "$BINARY"
+else
+    echo "Error: Aeth binary not found in $AETH_HOME/dist-newstyle/"
+    echo "Please run 'cabal build' inside the project folder first."
+    exit 1
+fi
