@@ -4,18 +4,67 @@ This guide explains how to customize Aeth to match your workflow and preferences
 
 ## Configuration File Location
 
-Aeth looks for its configuration file at:
+Aeth looks for its configuration files at:
 
 ```
 ~/.config/Aeth/config.hs
+~/.config/Aeth/rc
+~/.config/Aeth/sequences.txt
 ```
 
-A template is provided in the repository at `config/config.hs`. Copy it to get started:
+A template is provided in the repository at `config/`. Copy it to get started:
 
 ```bash
 mkdir -p ~/.config/Aeth
 cp config/config.hs ~/.config/Aeth/config.hs
+cp config/rc ~/.config/Aeth/rc
+cp config/sequences.txt ~/.config/Aeth/sequences.txt
 ```
+
+---
+
+## The `rc` File
+
+The `rc` file is an optional configuration resource for Aeth, located at:
+
+```
+~/.config/Aeth/rc
+```
+
+### Purpose
+
+-   The `rc` file allows you to reference additional configuration resources or run startup commands when Aeth starts.
+-   It is typically used to include files such as `sequences.txt` (for key bindings or terminal escape sequences), set environment variables, or run initialization commands.
+
+### Default Example
+
+The default `rc` file provided in the repository contains:
+
+```sh
+cat ~/.config/Aeth/sequences.txt
+```
+
+This means that, on startup, Aeth will read and apply the terminal escape sequences or key bindings defined in `sequences.txt`.
+
+### Customization
+
+-   You can edit `~/.config/Aeth/rc` to add your own commands or reference other files.
+-   For example, to set an environment variable and include a custom key sequence file:
+
+```sh
+export MY_AETH_VAR=1
+cat ~/.config/Aeth/sequences.txt
+cat ~/.config/Aeth/my_custom_keys.txt
+```
+
+-   You can use any shell commands supported by your environment.
+
+### Tips
+
+-   If you do not need custom startup commands, you can leave the `rc` file as-is or remove it.
+-   If you want to add more advanced startup logic, simply add the relevant shell commands to this file.
+
+---
 
 ## Configuration File Structure
 

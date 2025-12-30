@@ -1,0 +1,8 @@
+# rc - Configuration file for Aeth
+## move this file to $HOME/.config/Aeth 
+# This file lists configuration resources used by Aeth.
+# It currently references 'sequences.txt', which contains command or key sequences for Aeth.
+## XTerm OSC (Operating System Command) Escape Sequences, color palette definition got from caelestia's color scheme
+
+cat ~/.config/Aeth/sequences.txt
+fastfetch

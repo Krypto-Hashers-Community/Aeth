@@ -7,6 +7,10 @@ An elegant polymorphic shell that lacks the concept of elegance.
 * **Version:** Nish (0.0.0.0)
 * **License:** [MIT](LICENSE)
 
+<div align="center">
+  <img src="docs/assets/aeth.png" alt="Aeth Prompt" width="600"/>
+</div>
+
 A hybrid Linux shell written in Haskell, designed to bridge the legacy world of raw text with the modern world of structured data. Aeth is enjoyable to use, and safe by construction.
 
 Aeth is a **polymorphic shell** that doesn't force you into one paradigm. Instead of choosing between traditional Unix shells (text streams) or modern shells like Nushell (structured data), Aeth provides both:
@@ -77,7 +81,7 @@ cabal run Aeth
 ### Interactive Mode
 
 ```bash
-cabal run Aeth
+./aeth
 ```
 
 You'll see the dynamic prompt. Try these commands:

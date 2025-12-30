@@ -1,4 +1,4 @@
--- move this file to $HOME/.config/Aeth/config.hs to customize your shell
+-- move this file to $HOME/.config/Aeth to customize your shell
 module Config where
 
 import Control.Exception (IOException, try)
@@ -10,6 +10,7 @@ import System.Environment (lookupEnv)
 import qualified System.Exit as Exit
 import System.Posix.Unistd (SystemID (nodeName), getSystemID)
 import qualified System.Process as Proc
+import Data.Maybe (fromMaybe)
 
 -- Optional: enable fullscreen TUI
 useTui :: Bool
@@ -37,7 +38,7 @@ iconC = "\xE61E" -- 
 getUsername :: IO String
 getUsername = do
   m <- lookupEnv "USER"
-  pure (maybe "" id m)
+  pure (fromMaybe "" m)
 
 -- Note: the shell already passes a "pretty cwd" (e.g. ~/proj) as the first arg.
 
