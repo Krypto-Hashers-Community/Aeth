@@ -27,6 +27,9 @@ run :: IO ()
 run = do
   initialCwd <- Dir.getCurrentDirectory
   let st0 = emptyShellState initialCwd
+  -- Initialize prompt system (config.so/hint/background)
+  initPrompt
+  -- Load config for uiMode and extensions (can be cached later)
   (cfg, mCfgErr) <- loadConfig
   case mCfgErr of
     Nothing -> pure ()
@@ -51,20 +54,19 @@ loopNormal cfg =
   where
     go ed = do
       st <- get
-      promptStr <- liftIO (prompt cfg st)
-      history <- liftIO readHistory
-      mLine <- liftIO (getLineEdited ed [] promptStr history)
+      promptFn <- liftIO getPrompt
+      promptStr <- liftIO (promptFn st)
+      mLine <- liftIO (getLineEdited ed [] promptStr (history st))
       case mLine of
         Nothing -> pure ()
         Just line -> do
           liftIO (appendHistory line)
+          modify' (\st' -> st' {history = history st' ++ [line]})
           runOne (T.pack line)
           go ed
 
 loopTui :: ShellConfig -> StateT ShellState IO ()
 loopTui cfg = do
-  -- Run the fullscreen UI loop in IO using the current state snapshot.
-  -- When it exits, we stop the shell.
   st0 <- get
   _ <- liftIO $ VtyEd.withLineEditor $ \ed -> evalStateT (go ed []) st0
   pure ()
@@ -72,13 +74,14 @@ loopTui cfg = do
     go :: VtyEd.LineEditor -> [T.Text] -> StateT ShellState IO ()
     go ed scrollback = do
       st <- get
-      promptStr <- liftIO (prompt cfg st)
-      history <- liftIO readHistory
-      mLine <- liftIO (VtyEd.getLineEdited ed scrollback promptStr history)
+      promptFn <- liftIO getPrompt
+      promptStr <- liftIO (promptFn st)
+      mLine <- liftIO (VtyEd.getLineEdited ed scrollback promptStr (history st))
       case mLine of
         Nothing -> pure ()
         Just line -> do
           liftIO (appendHistory line)
+          modify' (\st' -> st' {history = history st' ++ [line]})
           out <- runOneCapture (T.pack line)
           let newScroll =
                 trimScrollback 1000 (scrollback ++ [T.pack (promptStr <> line)] ++ nonEmptyLines out)
@@ -123,6 +126,9 @@ startup _cfg = do
     contents <- liftIO (TIO.readFile path)
     let ls = filter (not . T.null) (map stripComments (T.lines contents))
     mapM_ runOne ls
+  -- Load history once at startup
+  hist <- liftIO readHistory
+  modify' (\st -> st {history = hist})
   where
     stripComments t = T.strip (T.takeWhile (/= '#') t)
 

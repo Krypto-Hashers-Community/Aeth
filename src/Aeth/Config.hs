@@ -7,8 +7,11 @@ module Aeth.Config
     renderPromptSegments,
     defaultConfig,
     loadConfig,
+    initPrompt,
+    getPrompt,
     configDir,
     configHsPath,
+    configTomlPath,
     rcFilePath,
     historyFilePath,
   )
@@ -16,8 +19,10 @@ where
 
 import Aeth.Structured (StructuredValue (..))
 import Aeth.Types (ShellState (..))
+import Control.Concurrent (forkIO)
 import Control.Exception (IOException, try)
 import Data.Char (isAsciiUpper, isSpace, toLower)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (stripPrefix)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
@@ -27,7 +32,11 @@ import qualified System.Directory as Dir
 import qualified System.Environment as Env
 import qualified System.Exit as Exit
 import qualified System.FilePath as FP
+import System.IO.Unsafe (unsafePerformIO)
+import qualified System.Posix.DynamicLinker as DL
 import qualified System.Process as Proc
+import Toml (TomlCodec, decode, parse, (.=))
+import qualified Toml
 
 -- Minimal, safe surface area for user customization.
 -- Keep this small while the shell is still experimental.
@@ -95,6 +104,36 @@ renderPromptTriples triples =
 data UiMode = NormalUi | TuiUi
   deriving (Eq, Show)
 
+data TomlConfig = TomlConfig
+  { configUiMode :: UiMode,
+    useDynamicPrompt :: Bool
+  }
+  deriving (Eq, Show)
+
+uiModeToText :: UiMode -> T.Text
+uiModeToText NormalUi = "normal"
+uiModeToText TuiUi = "tui"
+
+uiModeFromText :: T.Text -> UiMode
+uiModeFromText "normal" = NormalUi
+uiModeFromText "tui" = TuiUi
+uiModeFromText t = error ("invalid ui_mode: " <> T.unpack t)
+
+uiModeCodec :: TomlCodec UiMode
+uiModeCodec = Toml.dimap uiModeToText uiModeFromText (Toml.text "ui_mode")
+
+tomlConfigCodec :: TomlCodec TomlConfig
+tomlConfigCodec =
+  Toml.table
+    ( TomlConfig
+        <$> (Toml.dimap uiModeToText uiModeFromText (Toml.text "ui_mode") .= configUiMode)
+        <*> (Toml.bool "use_dynamic_prompt" .= useDynamicPrompt)
+    )
+    "aeth"
+
+defaultTomlConfig :: TomlConfig
+defaultTomlConfig = TomlConfig NormalUi False
+
 defaultConfig :: ShellConfig
 defaultConfig =
   ShellConfig
@@ -103,23 +142,124 @@ defaultConfig =
       structuredExtensions = []
     }
 
--- | Loads ~/.config/Aeth/config.hs via the GHC interpreter (hint).
---
--- Expected exports (optional):
---   myPrompt :: FilePath -> Int -> IO String
---
--- If it fails to load, returns defaultConfig + a human readable error.
-loadConfig :: IO (ShellConfig, Maybe String)
-loadConfig = do
-  path <- configHsPath
+loadTomlConfig :: IO (TomlConfig, Maybe String)
+loadTomlConfig = do
+  path <- configTomlPath
   exists <- Dir.doesFileExist path
   if not exists
-    then pure (defaultConfig, Nothing)
+    then pure (defaultTomlConfig, Nothing)
     else do
-      result <- try (loadConfigFrom path) :: IO (Either IOException (ShellConfig, Maybe String))
-      case result of
-        Left e -> pure (defaultConfig, Just ("config IO error: " <> show e))
-        Right ok -> pure ok
+      res <- Toml.decodeFileEither tomlConfigCodec path
+      case res of
+        Left errs -> pure (defaultTomlConfig, Just ("TOML decode error: " <> show errs))
+        Right cfg -> pure (cfg, Nothing)
+
+combineErrors :: Maybe String -> Maybe String -> Maybe String
+combineErrors Nothing Nothing = Nothing
+combineErrors (Just a) Nothing = Just a
+combineErrors Nothing (Just b) = Just b
+combineErrors (Just a) (Just b) = Just (a <> "; " <> b)
+
+-- | Load combined configuration: TOML + optional Haskell `config.hs`.
+loadConfig :: IO (ShellConfig, Maybe String)
+loadConfig = do
+  (tCfg, tErr) <- loadTomlConfig
+  hsPath <- configHsPath
+  cfgOrDefault <-
+    if useDynamicPrompt tCfg
+      then do
+        exists <- Dir.doesFileExist hsPath
+        if not exists
+          then pure (defaultConfig, Nothing)
+          else loadHaskellConfig hsPath
+      else pure (defaultConfig, Nothing)
+  let (hsCfg, hsErr) = cfgOrDefault
+      finalCfg = hsCfg {uiMode = configUiMode tCfg}
+      errs = combineErrors tErr hsErr
+  pure (finalCfg, errs)
+
+-- | Loads config from TOML and optionally Haskell.
+--
+-- If use_dynamic_prompt is true in config.toml, loads config.hs for prompt.
+-- Otherwise, uses default prompt.
+
+-- | Global IORef for the prompt function, initialized at startup
+promptRef :: IORef (ShellState -> IO String)
+promptRef = unsafePerformIO (newIORef (prompt defaultConfig))
+{-# NOINLINE promptRef #-}
+
+-- | Checks if config.so exists and is newer than config.hs
+configSoUpToDate :: IO Bool
+configSoUpToDate = do
+  hsPath <- configHsPath
+  soPath <- configSoPath
+  hsExists <- Dir.doesFileExist hsPath
+  soExists <- Dir.doesFileExist soPath
+  if not (hsExists && soExists)
+    then pure False
+    else do
+      hsTime <- Dir.getModificationTime hsPath
+      soTime <- Dir.getModificationTime soPath
+      pure (soTime > hsTime)
+
+configSoPath :: IO FilePath
+configSoPath = do
+  dir <- configDir
+  pure (dir FP.</> "config.so")
+
+-- | Loads the prompt function from config.so using dynamic linker
+loadPromptFromSo :: FilePath -> IO (Maybe (ShellState -> IO String))
+loadPromptFromSo soPath = do
+  -- This assumes the .so exports a symbol "aeth_prompt" of type ShellState -> IO String
+  -- You must ensure ABI compatibility and symbol name during compilation
+  -- This is a stub: actual implementation will require FFI and stable ABI
+  pure Nothing -- TODO: Implement FFI loading
+
+-- | Compiles config.hs to config.so in a background thread
+compileConfigSo :: IO ()
+compileConfigSo = do
+  hsPath <- configHsPath
+  soPath <- configSoPath
+  -- Use the same GHC as main binary, with -shared -dynamic
+  _ <- forkIO $ do
+    _ <- Proc.readProcess "ghc" ["-shared", "-dynamic", hsPath, "-o", soPath] ""
+    -- After compilation, attempt to load the new prompt function
+    mPrompt <- loadPromptFromSo soPath
+    case mPrompt of
+      Just fn -> writeIORef promptRef fn
+      Nothing -> pure ()
+  pure ()
+
+-- | Initializes the prompt function at shell startup
+initPrompt :: IO ()
+initPrompt = do
+  upToDate <- configSoUpToDate
+  soPath <- configSoPath
+  if upToDate
+    then do
+      mPrompt <- loadPromptFromSo soPath
+      case mPrompt of
+        Just fn -> writeIORef promptRef fn
+        Nothing -> fallback
+    else fallback
+  where
+    fallback = do
+      -- Use hint to interpret config.hs, or default prompt
+      hsPath <- configHsPath
+      exists <- Dir.doesFileExist hsPath
+      if not exists
+        then writeIORef promptRef (prompt defaultConfig)
+        else do
+          result <- try (loadHaskellConfig hsPath) :: IO (Either IOException (ShellConfig, Maybe String))
+          case result of
+            Right (cfg, _) -> writeIORef promptRef (prompt cfg)
+            _ -> writeIORef promptRef (prompt defaultConfig)
+      -- Start background compilation
+      compileConfigSo
+
+-- | Use this function to get the current prompt function
+getPrompt :: IO (ShellState -> IO String)
+getPrompt = readIORef promptRef
 
 configDir :: IO FilePath
 configDir = do
@@ -136,6 +276,11 @@ configHsPath = do
   dir <- configDir
   pure (dir FP.</> "config.hs")
 
+configTomlPath :: IO FilePath
+configTomlPath = do
+  dir <- configDir
+  pure (dir FP.</> "config.toml")
+
 rcFilePath :: IO FilePath
 rcFilePath = do
   dir <- configDir
@@ -146,8 +291,8 @@ historyFilePath = do
   dir <- configDir
   pure (dir FP.</> "history")
 
-loadConfigFrom :: FilePath -> IO (ShellConfig, Maybe String)
-loadConfigFrom filePath = do
+loadHaskellConfig :: FilePath -> IO (ShellConfig, Maybe String)
+loadHaskellConfig filePath = do
   -- The user module can just be `module Config where`.
   -- We interpret its exported values with explicit types.
   let run :: Hint.Interpreter a -> IO (Either Hint.InterpreterError a)
@@ -325,9 +470,9 @@ loadConfigFrom filePath = do
       if mUseTui
         then Hint.interpret "useTui" (Hint.as :: Bool)
         else pure False
-    let mode = if useTuiVal then TuiUi else NormalUi
+    -- uiMode is now from TOML, ignore useTui here
 
-    pure ShellConfig {prompt = promptFn, uiMode = mode, structuredExtensions = []}
+    pure ShellConfig {prompt = promptFn, uiMode = NormalUi, structuredExtensions = []}
 
   case loaded of
     Left e -> pure (defaultConfig, Just (renderInterpreterError e))

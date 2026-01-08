@@ -29,9 +29,10 @@ data ShellState = ShellState
   { cwd :: FilePath,
     envOverrides :: Map.Map String String,
     lastExitCode :: Int,
-    lastDurationMs :: Maybe Int
+    lastDurationMs :: Maybe Int,
+    history :: [String]
   }
   deriving (Eq, Show)
 
 emptyShellState :: FilePath -> ShellState
-emptyShellState initialCwd = ShellState {cwd = initialCwd, envOverrides = Map.empty, lastExitCode = 0, lastDurationMs = Nothing}
+emptyShellState initialCwd = ShellState {cwd = initialCwd, envOverrides = Map.empty, lastExitCode = 0, lastDurationMs = Nothing, history = []}

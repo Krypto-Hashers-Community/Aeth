@@ -2,15 +2,28 @@
 module Config where
 
 import Control.Exception (IOException, try)
+import Data.IORef
 import Data.List (isSuffixOf)
+import Data.Maybe (fromMaybe)
 import Data.Time (getZonedTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified System.Directory as Dir
 import System.Environment (lookupEnv)
 import qualified System.Exit as Exit
+import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Unistd (SystemID (nodeName), getSystemID)
 import qualified System.Process as Proc
-import Data.Maybe (fromMaybe)
+
+-- Cached values computed once at module load
+username :: String
+username = unsafePerformIO getUsername
+
+hostname :: String
+hostname = unsafePerformIO (nodeName <$> getSystemID)
+
+-- Cache for lang icons based on cwd
+cachedLangIcons :: IORef (Maybe (FilePath, [String]))
+cachedLangIcons = unsafePerformIO (newIORef Nothing)
 
 -- Optional: enable fullscreen TUI
 useTui :: Bool
@@ -76,26 +89,32 @@ getBatteryPercent = do
 detectLangIcons :: IO [String]
 detectLangIcons = do
   cwd <- Dir.getCurrentDirectory
-  entries <- Dir.listDirectory cwd
-  let has f = Dir.doesFileExist (cwd <> "/" <> f)
-  let anyHas fs = or <$> mapM has fs
+  mCached <- readIORef cachedLangIcons
+  case mCached of
+    Just (cachedCwd, icons) | cachedCwd == cwd -> pure icons
+    _ -> do
+      entries <- Dir.listDirectory cwd
+      let has f = Dir.doesFileExist (cwd <> "/" <> f)
+      let anyHas fs = or <$> mapM has fs
 
-  let hasCabal = any (isSuffixOf ".cabal") entries
-  isHsSentinel <- anyHas ["cabal.project", "stack.yaml", "package.yaml"]
-  let isHs = hasCabal || isHsSentinel
-  isPy <- anyHas ["pyproject.toml", "requirements.txt", "Pipfile", "poetry.lock"]
-  isNode <- anyHas ["package.json", "pnpm-lock.yaml", "yarn.lock", "package-lock.json"]
-  isRust <- anyHas ["Cargo.toml"]
-  isGo <- anyHas ["go.mod"]
-  isC <- anyHas ["CMakeLists.txt", "Makefile"]
+      let hasCabal = any (isSuffixOf ".cabal") entries
+      isHsSentinel <- anyHas ["cabal.project", "stack.yaml", "package.yaml"]
+      let isHs = hasCabal || isHsSentinel
+      isPy <- anyHas ["pyproject.toml", "requirements.txt", "Pipfile", "poetry.lock"]
+      isNode <- anyHas ["package.json", "pnpm-lock.yaml", "yarn.lock", "package-lock.json"]
+      isRust <- anyHas ["Cargo.toml"]
+      isGo <- anyHas ["go.mod"]
+      isC <- anyHas ["CMakeLists.txt", "Makefile"]
 
-  pure $
-    [iconHaskell | isHs]
-      ++ [iconPython | isPy]
-      ++ [iconNode | isNode]
-      ++ [iconRust | isRust]
-      ++ [iconGo | isGo]
-      ++ [iconC | isC]
+      let icons =
+            [iconHaskell | isHs]
+              ++ [iconPython | isPy]
+              ++ [iconNode | isNode]
+              ++ [iconRust | isRust]
+              ++ [iconGo | isGo]
+              ++ [iconC | isC]
+      writeIORef cachedLangIcons (Just (cwd, icons))
+      pure icons
 
 -- 3. Prompt segments API
 --
@@ -110,8 +129,6 @@ detectLangIcons = do
 -- Background is set to "default" for a transparent look.
 myPromptSegments :: FilePath -> Maybe String -> Int -> Maybe Int -> IO [(String, String, String)]
 myPromptSegments cwdPretty gitBranch lastExit lastDurationMs = do
-  username <- getUsername
-  hostname <- nodeName <$> getSystemID
   now <- getZonedTime
   let clock = formatTime defaultTimeLocale "%H:%M" now
   mIp <- getPrimaryIp
