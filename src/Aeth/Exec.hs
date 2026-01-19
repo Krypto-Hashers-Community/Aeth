@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Aeth.Exec
   ( runPipeline,
@@ -6,21 +7,46 @@ module Aeth.Exec
   )
 where
 
+import Aeth.Parse (parsePipeline)
 import Aeth.Structured
 import Aeth.Types
-import Control.Exception (IOException, try)
-import Control.Monad (when)
+import Control.Concurrent (threadDelay)
+import Control.Exception (IOException, SomeException, try)
+import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (StateT, get, put)
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified System.Directory as Dir
 import qualified System.Exit as Exit
 import qualified System.FilePath as FP
 import System.IO (hClose, stderr)
+import System.Posix.Process (executeFile, forkProcess, getProcessStatus)
+import System.Posix.Types (ProcessID)
 import qualified System.Process as Proc
+
+-- | Shared list of shell builtin commands
+shellBuiltins :: [T.Text]
+shellBuiltins =
+  [ "cd",
+    "exit",
+    "export",
+    "unset",
+    "pwd",
+    "history",
+    "clear",
+    "source",
+    ".",
+    "type",
+    "which",
+    "echo",
+    "true",
+    "false",
+    "jobs"
+  ]
 
 exitCodeToInt :: Exit.ExitCode -> Int
 exitCodeToInt ec =
@@ -33,12 +59,31 @@ setLastExit ec = do
   st <- get
   put st {lastExitCode = exitCodeToInt ec}
 
-runPipeline :: (MonadIO m) => Pipeline -> StateT ShellState m ()
-runPipeline (Pipeline segments) =
-  case segments of
-    [] -> pure ()
-    [seg] -> runSingle seg
-    _ -> runMulti segments
+-- | Type alias for alias map
+type AliasMap = Map.Map T.Text T.Text
+
+-- | Expand aliases in a segment
+expandAlias :: AliasMap -> Segment -> Segment
+expandAlias aliasMap seg =
+  case Map.lookup (segName seg) aliasMap of
+    Nothing -> seg
+    Just expanded ->
+      let tokens = T.words expanded
+       in case tokens of
+            [] -> seg
+            (cmd : args) ->
+              let isStructured = T.isPrefixOf "@" cmd
+                  mode = if isStructured then Structured else RawString
+                  name = if isStructured then T.drop 1 cmd else cmd
+               in seg {segMode = mode, segName = name, segArgs = args ++ segArgs seg}
+
+runPipeline :: (MonadIO m) => AliasMap -> Pipeline -> StateT ShellState m ()
+runPipeline aliasMap (Pipeline segments) =
+  let expandedSegments = map (expandAlias aliasMap) segments
+   in case expandedSegments of
+        [] -> pure ()
+        [seg] -> runSingle seg
+        _ -> runMulti expandedSegments
 
 -- | Like 'runPipeline' but captures stdout/stderr into a returned Text.
 -- Used by the interactive Vty UI so output stays visible.
@@ -160,6 +205,15 @@ structuredApply seg input =
       case filterStructured expr input of
         Left e -> pure (SText ("Aeth: " <> e), Exit.ExitFailure 2)
         Right out -> pure (out, Exit.ExitSuccess)
+    "sort" -> do
+      let col = T.unwords (segArgs seg)
+      case sortStructured col input of
+        Left e -> pure (SText ("Aeth: " <> e), Exit.ExitFailure 2)
+        Right out -> pure (out, Exit.ExitSuccess)
+    "select" -> do
+      case selectStructured (segArgs seg) input of
+        Left e -> pure (SText ("Aeth: " <> e), Exit.ExitFailure 2)
+        Right out -> pure (out, Exit.ExitSuccess)
     _ -> do
       -- Fallback: run as external command that consumes rendered input and captures stdout.
       st <- get
@@ -186,6 +240,51 @@ externalToStructuredStdin workingDir envMap name args stdinText = do
         _ ->
           pure (SText (T.pack out <> (if null err then "" else "\n" <> T.pack err) <> "\n" <> "exit: " <> T.pack (show ec)), ec)
 
+-- | Helper for cd: resolve target and change directory
+doCd :: (MonadIO m) => ShellState -> Map.Map String String -> Maybe String -> StateT ShellState m ()
+doCd st envMap target = do
+  result <- liftIO (try (resolveCdTarget envMap target >>= Dir.setCurrentDirectory) :: IO (Either IOException ()))
+  case result of
+    Left e -> do
+      liftIO (hPutShellError ("cd: " <> T.pack (show e)))
+      put st {lastExitCode = 1}
+    Right () -> do
+      newDir <- liftIO Dir.getCurrentDirectory
+      let oldDir = cwd st
+      put
+        st
+          { cwd = newDir,
+            envOverrides =
+              Map.insert
+                "PWD"
+                newDir
+                (Map.insert "OLDPWD" oldDir (envOverrides st)),
+            lastExitCode = 0
+          }
+
+-- | Helper for cd in capture context: resolve target and change directory, return output
+doCdCapture :: ShellState -> Map.Map String String -> Maybe String -> StateT ShellState IO T.Text
+doCdCapture st envMap target = do
+  result <- liftIO (try (resolveCdTarget envMap target >>= Dir.setCurrentDirectory) :: IO (Either IOException ()))
+  case result of
+    Left e -> do
+      put st {lastExitCode = 1}
+      pure ("cd: " <> T.pack (show e))
+    Right () -> do
+      newDir <- liftIO Dir.getCurrentDirectory
+      let oldDir = cwd st
+      put
+        st
+          { cwd = newDir,
+            envOverrides =
+              Map.insert
+                "PWD"
+                newDir
+                (Map.insert "OLDPWD" oldDir (envOverrides st)),
+            lastExitCode = 0
+          }
+      pure ""
+
 runRawSingle :: (MonadIO m) => Segment -> StateT ShellState m ()
 runRawSingle seg = do
   let name = segName seg
@@ -195,31 +294,32 @@ runRawSingle seg = do
     else case name of
       "exit" -> liftIO (Exit.exitWith Exit.ExitSuccess)
       "export" -> runExport args
+      "unset" -> runUnset args
+      "pwd" -> runPwd
+      "history" -> runHistory
+      "clear" -> liftIO $ do
+        putStr "\ESC[2J\ESC[H" -- ANSI clear screen
+      "source" -> runSource args
+      "." -> runSource args -- POSIX alias for source
+      "type" -> runType args
+      "which" -> runWhich args
+      "echo" -> runEcho args
+      "true" -> setLastExit Exit.ExitSuccess
+      "false" -> setLastExit (Exit.ExitFailure 1)
+      "jobs" -> runJobs
       "cd" -> do
         st <- get
         let envMap = effectiveEnvMap st
-        let target =
-              case args of
-                [] -> Nothing
-                (p : _) -> Just (T.unpack (expandTextEnv envMap p))
-        result <- liftIO (try (resolveCdTarget envMap target >>= Dir.setCurrentDirectory) :: IO (Either IOException ()))
-        case result of
-          Left e -> do
-            liftIO (hPutShellError ("cd: " <> T.pack (show e)))
-            put st {lastExitCode = 1}
-          Right () -> do
-            newDir <- liftIO Dir.getCurrentDirectory
-            let oldDir = cwd st
-            put
-              st
-                { cwd = newDir,
-                  envOverrides =
-                    Map.insert
-                      "PWD"
-                      newDir
-                      (Map.insert "OLDPWD" oldDir (envOverrides st)),
-                  lastExitCode = 0
-                }
+        -- Handle "cd -" specially: error if OLDPWD not set
+        case args of
+          ("-" : _) ->
+            case Map.lookup "OLDPWD" envMap of
+              Nothing -> do
+                liftIO (hPutShellError "cd: OLDPWD not set")
+                put st {lastExitCode = 1}
+              Just oldpwd -> doCd st envMap (Just oldpwd)
+          [] -> doCd st envMap Nothing
+          (p : _) -> doCd st envMap (Just (T.unpack (expandTextEnv envMap p)))
       _ ->
         if shouldUseShSegment seg
           then do
@@ -243,29 +343,16 @@ runRawSingleCapture seg = do
       "cd" -> do
         st <- get
         let envMap = effectiveEnvMap st
-        let target =
-              case args of
-                [] -> Nothing
-                (p : _) -> Just (T.unpack (expandTextEnv envMap p))
-        result <- liftIO (try (resolveCdTarget envMap target >>= Dir.setCurrentDirectory) :: IO (Either IOException ()))
-        case result of
-          Left e -> do
-            put st {lastExitCode = 1}
-            pure ("Aeth: cd: " <> T.pack (show e))
-          Right () -> do
-            newDir <- liftIO Dir.getCurrentDirectory
-            let oldDir = cwd st
-            put
-              st
-                { cwd = newDir,
-                  envOverrides =
-                    Map.insert
-                      "PWD"
-                      newDir
-                      (Map.insert "OLDPWD" oldDir (envOverrides st)),
-                  lastExitCode = 0
-                }
-            pure ""
+        -- Handle "cd -" specially: error if OLDPWD not set
+        case args of
+          ("-" : _) ->
+            case Map.lookup "OLDPWD" envMap of
+              Nothing -> do
+                put st {lastExitCode = 1}
+                pure "cd: OLDPWD not set"
+              Just oldpwd -> doCdCapture st envMap (Just oldpwd)
+          [] -> doCdCapture st envMap Nothing
+          (p : _) -> doCdCapture st envMap (Just (T.unpack (expandTextEnv envMap p)))
       _ ->
         if shouldUseShSegment seg
           then runViaShCapture (renderRawSegment seg)
@@ -432,16 +519,29 @@ structuredValueFor seg = do
   liftIO $
     case name of
       "ls" -> do
-        -- Filter out flags (arguments starting with -) and use first path, or cwd
-        let nonFlags = filter (not . T.isPrefixOf "-") args'
-        let targetDir =
-              case nonFlags of
-                (p : _) -> T.unpack p
-                _ -> cwd st
-        v <- lsStructured targetDir
+        let (opts, pathArgs) = parseLsArgs args'
+        let targetDir = case pathArgs of
+              (p : _) -> T.unpack p
+              _ -> cwd st
+        v <- lsStructured opts targetDir
         pure (v, Exit.ExitSuccess)
       "pwd" -> do
         v <- pwdStructured (cwd st)
+        pure (v, Exit.ExitSuccess)
+      "ps" -> do
+        v <- psStructured
+        pure (v, Exit.ExitSuccess)
+      "df" -> do
+        v <- dfStructured
+        pure (v, Exit.ExitSuccess)
+      "env" -> do
+        v <- envStructured
+        pure (v, Exit.ExitSuccess)
+      "find" -> do
+        let (basePath, patterns) = case args' of
+              [] -> (cwd st, [])
+              (p : rest) -> (T.unpack p, rest)
+        v <- findStructured basePath patterns
         pure (v, Exit.ExitSuccess)
       _ -> do
         -- For now, treat unknown @commands as "capture external stdout".
@@ -596,9 +696,11 @@ resolveCdTarget envMap mTarget =
     Nothing -> do
       Dir.makeAbsolute (Map.findWithDefault "." "HOME" envMap)
 
--- | Merge base env with overrides (overrides win).
+-- | Merge base env with overrides (overrides win), excluding deleted vars.
 effectiveEnvMap :: ShellState -> Map.Map String String
-effectiveEnvMap st = Map.union (envOverrides st) (baseEnv st)
+effectiveEnvMap st =
+  let merged = Map.union (envOverrides st) (baseEnv st)
+   in foldr Map.delete merged (Set.toList (deletedEnv st))
 
 -- | Tilde expansion for arguments (only leading ~ forms).
 expandTildeText :: Map.Map String String -> T.Text -> T.Text
@@ -676,3 +778,160 @@ runExport args = do
               let key = T.unpack (T.strip k)
                   val = T.unpack (T.drop 1 vEq)
                in pure (Map.insert key val acc)
+
+-- | unset - remove environment variables (adds to tombstone set so inherited vars are also unset)
+runUnset :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+runUnset args = do
+  st <- get
+  let keys = map T.unpack args
+      newOverrides = foldr Map.delete (envOverrides st) keys
+      newDeleted = foldr Set.insert (deletedEnv st) keys
+  put st {envOverrides = newOverrides, deletedEnv = newDeleted, lastExitCode = 0}
+
+-- | pwd - print working directory
+runPwd :: (MonadIO m) => StateT ShellState m ()
+runPwd = do
+  st <- get
+  liftIO $ putStrLn (cwd st)
+  setLastExit Exit.ExitSuccess
+
+-- | history - show command history
+runHistory :: (MonadIO m) => StateT ShellState m ()
+runHistory = do
+  st <- get
+  let hist = history st
+  liftIO $ mapM_ (\(i, cmd) -> putStrLn $ show i ++ "  " ++ cmd) (zip [1 ..] hist)
+  setLastExit Exit.ExitSuccess
+
+-- | source - execute commands from a file
+-- Executes each line in the current shell context so exports/cd persist.
+-- Note: Aliases are not expanded in sourced files.
+runSource :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+runSource args = do
+  case args of
+    [] -> do
+      liftIO $ hPutShellError "source: filename argument required"
+      setLastExit (Exit.ExitFailure 1)
+    (path : _) -> do
+      st <- get
+      let envMap = effectiveEnvMap st
+      let expandedPath = T.unpack (expandTextEnv envMap path)
+      exists <- liftIO $ Dir.doesFileExist expandedPath
+      if not exists
+        then do
+          liftIO $ hPutShellError ("source: " <> T.pack expandedPath <> ": No such file")
+          setLastExit (Exit.ExitFailure 1)
+        else do
+          contentResult <- liftIO $ try (TIO.readFile expandedPath)
+          case contentResult of
+            Left (e :: IOException) -> do
+              liftIO $ hPutShellError ("source: " <> T.pack (show e))
+              setLastExit (Exit.ExitFailure 1)
+            Right content -> do
+              let lns = filter (not . T.null) (map stripComments (T.lines content))
+              -- Execute each line in the current shell context
+              mapM_ executeSourceLine lns
+  where
+    stripComments t = T.strip (T.takeWhile (/= '#') t)
+
+    executeSourceLine lineText = do
+      case parsePipeline lineText of
+        Left err -> do
+          when (err /= "empty") $ do
+            liftIO $ hPutShellError ("source: parse error: " <> T.pack err)
+            setLastExit (Exit.ExitFailure 2)
+        Right pipeline -> runPipeline Map.empty pipeline
+
+-- | type - describe a command
+runType :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+runType args = do
+  st <- get
+  let envMap = effectiveEnvMap st
+  -- Use the shared shellBuiltins constant
+  results <- mapM (checkCmd envMap) args
+  -- Set exit status based on whether all commands were found
+  if and results
+    then setLastExit Exit.ExitSuccess
+    else setLastExit (Exit.ExitFailure 1)
+  where
+    checkCmd envMap cmd = do
+      if cmd `elem` shellBuiltins
+        then do
+          liftIO $ TIO.putStrLn (cmd <> " is a shell builtin")
+          pure True
+        else do
+          mPath <- liftIO $ findExecutable envMap (T.unpack cmd)
+          case mPath of
+            Just p -> do
+              liftIO $ TIO.putStrLn (cmd <> " is " <> T.pack p)
+              pure True
+            Nothing -> do
+              liftIO $ TIO.putStrLn (cmd <> " not found")
+              pure False
+
+-- | which - find executable
+runWhich :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+runWhich args = do
+  st <- get
+  let envMap = effectiveEnvMap st
+  allFound <- mapM (checkCmd envMap) args
+  setLastExit $ if and allFound then Exit.ExitSuccess else Exit.ExitFailure 1
+  where
+    checkCmd envMap cmd = do
+      mPath <- liftIO $ findExecutable envMap (T.unpack cmd)
+      case mPath of
+        Just p -> do
+          liftIO $ putStrLn p
+          pure True
+        Nothing -> pure False
+
+-- | echo - print arguments
+runEcho :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
+runEcho args = do
+  st <- get
+  let envMap = effectiveEnvMap st
+  let expanded = map (expandTextEnv envMap) args
+  liftIO $ TIO.putStrLn (T.unwords expanded)
+  setLastExit Exit.ExitSuccess
+
+-- | jobs - list background jobs
+runJobs :: (MonadIO m) => StateT ShellState m ()
+runJobs = do
+  st <- get
+  let jobs = backgroundJobs st
+  if null jobs
+    then setLastExit Exit.ExitSuccess
+    else do
+      liftIO $ mapM_ printJob jobs
+      setLastExit Exit.ExitSuccess
+  where
+    printJob job =
+      TIO.putStrLn $
+        "["
+          <> T.pack (show (jobId job))
+          <> "] "
+          <> T.pack (show (jobStatus job))
+          <> " "
+          <> jobCommand job
+
+-- | Find executable in PATH, or test directly if name contains '/'
+findExecutable :: Map.Map String String -> String -> IO (Maybe FilePath)
+findExecutable envMap name
+  -- If name contains '/', test it directly instead of searching PATH
+  | elem '/' name = do
+      exists <- Dir.doesFileExist name
+      isExe <- if exists then Dir.executable <$> Dir.getPermissions name else pure False
+      pure (if exists && isExe then Just name else Nothing)
+  | otherwise = do
+      let pathEnv = Map.findWithDefault "" "PATH" envMap
+          pathDirs = FP.splitSearchPath pathEnv
+      findFirst pathDirs
+  where
+    findFirst [] = pure Nothing
+    findFirst (d : ds) = do
+      let fullPath = d FP.</> name
+      exists <- Dir.doesFileExist fullPath
+      isExe <- if exists then Dir.executable <$> Dir.getPermissions fullPath else pure False
+      if exists && isExe
+        then pure (Just fullPath)
+        else findFirst ds

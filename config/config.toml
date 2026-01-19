@@ -1,22 +1,36 @@
 # Aeth Shell Configuration
 # See docs/CONFIGURATION.md for full documentation
 
-# UI Mode: 'normal' (inline) or 'tui' (fullscreen with scrollback)
+# UI Mode: 'normal' or 'tui' (fullscreen)
 ui_mode = "normal"
 
-# Prompt Style: 'minimal', 'powerline', or 'simple'
-# - minimal:   ~/dir (branch) >
-# - powerline: ~/dir | branch | ✓
-# - simple:    user@host:dir$
+# Prompt Style: 'minimal', 'powerline', 'simple', or 'custom'
 prompt_style = "minimal"
 
-# Prompt Features
-show_git_branch = true    # Show current git branch
-show_exit_code = true     # Show error indicator for non-zero exit codes
-show_duration = false     # Show command execution time (if > 100ms)
+# Custom prompt format (only used when prompt_style = 'custom')
+# Placeholders: {cwd}, {user}, {host}, {branch}, {exit}, {git}
+# prompt = "{user}@{host}:{cwd} {git}$ "
 
-# Color Names: black, red, green, yellow, blue, magenta, cyan, white, gray
-cwd_color = "cyan"        # Current directory color
-git_color = "magenta"     # Git branch color
-error_color = "red"       # Error indicator color
-success_color = "green"   # Success indicator color
+# Prompt Features
+show_git_branch = true
+show_exit_code = true
+show_duration = false
+
+# Colors: black, red, green, yellow, blue, magenta, cyan, white, gray
+cwd_color = "cyan"
+git_color = "magenta"
+error_color = "red"
+success_color = "green"
+
+# Security
+# Restricts potentially dangerous operations (see docs/SECURITY.md)
+safe_mode = true
+
+# History
+history_size = 10000
+
+# Aliases
+# alias.ll = "ls -la"
+# alias.la = "@ls -a"
+# alias.g = "git"
+# alias.cls = "clear"

@@ -149,7 +149,7 @@ runOne t =
     Right p -> do
       start <- liftIO getCurrentTime
       liftIO (hFlush stdout)
-      runPipeline p
+      runPipeline Map.empty p
       end <- liftIO getCurrentTime
       let ms = max 0 (floor (realToFrac (diffUTCTime end start) * (1000 :: Double)) :: Int)
       modify' (\st -> st {lastDurationMs = Just ms})

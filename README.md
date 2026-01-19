@@ -1,81 +1,105 @@
 # Aeth
 
-[![prabinpanta0](https://img.shields.io/badge/prabinpanta0-red)](https://github.com/prabinpanta0)
-![NISH](https://img.shields.io/badge/Aeth-Nesh-green)
+A hybrid Linux shell written in Haskell that bridges traditional text-based shells with modern structured data.
 
-An elegant polymorphic shell that lacks the concept of elegance.
-
--   **Version:** 0.1.0
+-   **Version:** 0.2.0
 -   **License:** [MIT](LICENSE)
 
-<div align="center">
-  <img src="docs/assets/aeth.png" alt="Aeth Prompt" width="600"/>
-</div>
+Aeth is a polymorphic shell that supports both traditional Unix commands and structured data operations:
 
-A hybrid Linux shell written in Haskell, designed to bridge the legacy world of raw text with the modern world of structured data. Aeth is enjoyable to use, and safe by construction.
-
-Aeth is a **polymorphic shell** that doesn't force you into one paradigm. Instead of choosing between traditional Unix shells (text streams) or modern shells like Nushell (structured data), Aeth provides both:
-
--   **Raw Mode:** `ls` → Returns text (traditional shell behavior)
--   **Structured Mode:** `@ls` → Returns structured data (tables)
-
-This allows you to leverage decades of Unix tools while also enjoying the benefits of type-safe structured data manipulation.
+-   **Raw Mode:** `ls` returns text (traditional shell behavior)
+-   **Structured Mode:** `@ls` returns structured data (tables with columns)
 
 ---
 
 ## Features
 
-### Core Shell Capabilities
+### Core Shell
 
--   **⚡ Fast Startup:** ~25ms launch time
--   **Process Management:** Fork/exec to launch external programs
--   **Path Resolution:** Finds executables through `$PATH`
--   **Piping:** Connect stdout → stdin for commands
--   **Built-in Commands:** `cd`, `exit`, `export`, `pwd`, `history`, `clear`
--   **Environment Variables:** Full access to all system variables (`$HOME`, `$USER`, `$PATH`, etc.)
--   **Tab Completion:** Command and path completion
--   **Signal Handling:** Proper Ctrl+C and Ctrl+D handling
--   **IDE Compatible:** Works correctly in VS Code and other IDE terminals
--   **AI/Copilot Compatible:** Can receive programmatic input
--   **Proper Quoting:** Supports `"double quotes"`, `'single quotes'`, and `escape\ characters`
+-   Fast startup (~25ms)
+-   Process management via fork/exec
+-   Path resolution through `$PATH`
+-   Piping and I/O redirection
+-   Environment variable expansion
+-   Tab completion for commands and paths
+-   Command history with up/down arrow navigation
+-   Signal handling (Ctrl+C, Ctrl+D)
+-   Proper quoting support
+
+### Built-in Commands
+
+| Command            | Description                        |
+| ------------------ | ---------------------------------- |
+| `cd [path]`        | Change directory (supports `cd -`) |
+| `pwd`              | Print working directory            |
+| `exit`             | Exit shell                         |
+| `export KEY=VALUE` | Set environment variable           |
+| `unset KEY`        | Remove environment variable        |
+| `history`          | Show command history               |
+| `clear`            | Clear screen                       |
+| `source FILE`      | Execute commands from file         |
+| `type CMD`         | Show command type                  |
+| `which CMD`        | Find executable path               |
+| `echo [args]`      | Print arguments                    |
+| `true` / `false`   | Return exit codes                  |
+| `jobs`             | List background jobs               |
 
 ### Structured Commands
 
--   **`@ls [path]`** - List directory contents as structured table (name, kind, size)
--   **`@pwd`** - Print working directory as structured text
--   **`filter`** - Filter structured tables with expressions
+| Command                  | Description             |
+| ------------------------ | ----------------------- |
+| `@ls [path]`             | List directory as table |
+| `@ls -a`                 | Include hidden files    |
+| `@pwd`                   | Print working directory |
+| `@ps`                    | Process list as table   |
+| `@df`                    | Disk usage as table     |
+| `@env`                   | Environment variables   |
+| `@find [path] [pattern]` | Find files recursively  |
+
+### Structured Transformations
+
+| Command                      | Description             |
+| ---------------------------- | ----------------------- |
+| `filter { .field op value }` | Filter table rows       |
+| `sort .field`                | Sort table by column    |
+| `select .field1 .field2`     | Select specific columns |
+
+**Filter operators:** `==`, `!=`, `>`, `>=`, `<`, `<=`, `contains`
+
+Example:
+
+```bash
+@ls | filter { .size > 1MB }
+@ls | filter { .kind == dir }
+@ps | filter { .%CPU > 1 }
+```
 
 ### Configurable Prompt
 
-Choose from built-in prompt styles or customize colors:
+Prompt styles: `minimal`, `powerline`, `simple`, or custom format.
 
--   **minimal:** `~/projects (main) > `
--   **powerline:** `~/projects  main  ✓`
--   **simple:** `user@host:~/projects$ `
+Custom prompt placeholders: `{cwd}`, `{user}`, `{host}`, `{branch}`, `{exit}`, `{git}`
+
+### Command Aliases
+
+Define in config.toml:
+
+```toml
+alias.ll = "ls -la"
+alias.la = "@ls -a"
+```
 
 ---
 
 ## Installation
 
-### Prerequisites
-
--   GHC 9.6+ and Cabal
-
-### Build
+Requirements: GHC 9.6+ and Cabal
 
 ```bash
-# Clone the repository
 git clone https://github.com/prabinpanta0/Aeth
 cd Aeth
-
-# Build
 cabal build
-
-# Run
 cabal run Aeth
-
-# Or install to ~/.cabal/bin
-cabal install
 ```
 
 ---
@@ -88,146 +112,60 @@ cabal install
 ./aeth
 ```
 
-Try these commands:
-
-```bash
-# Raw mode (traditional shell)
-ls -la
-echo "hello world"
-cat README.md | grep Aeth
-
-# Structured mode
-@ls
-@pwd
-@ls /usr/bin
-
-# Filtered structured output
-@ls | filter { .size > 1MB }
-@ls | filter { .kind == dir }
-@ls | filter { .name contains test }
-```
-
 ### Non-Interactive Mode
-
-Execute commands directly:
 
 ```bash
 ./aeth -c "ls -la"
 ./aeth -c "@ls"
-./aeth -c "echo 'hello world'"
 ```
-
-### Filtering Structured Data
-
-The `filter` command allows rich queries on structured tables:
-
-```bash
-@ls | filter { .size > 1MB }        # Files larger than 1MB
-@ls | filter { .size >= 1024 }      # Files >= 1024 bytes
-@ls | filter { .kind == dir }       # Only directories
-@ls | filter { .kind != file }      # Everything except files
-@ls | filter { .name contains kde } # Names containing "kde"
-```
-
-**Supported operators:** `==`, `!=`, `>`, `>=`, `<`, `<=`, `contains`  
-**Supported fields:** `.name`, `.kind`, `.size`
 
 ---
 
 ## Configuration
 
-Aeth uses a simple TOML-like configuration file.
-
-### Default Location
-
-```
-~/.config/Aeth/config.toml
-```
-
-### Example Configuration
-
-```toml
-# UI Mode: 'normal' or 'tui' (fullscreen)
-ui_mode = "normal"
-
-# Prompt Style: 'minimal', 'powerline', or 'simple'
-prompt_style = "minimal"
-
-# Prompt features
-show_git_branch = true
-show_exit_code = true
-show_duration = false
-
-# Colors: black, red, green, yellow, blue, magenta, cyan, white, gray
-cwd_color = "cyan"
-git_color = "magenta"
-error_color = "red"
-success_color = "green"
-```
-
-### Quick Setup
+Location: `~/.config/Aeth/config.toml`
 
 ```bash
-# Create config directory
 mkdir -p ~/.config/Aeth
-
-# Copy template
 cp config/config.toml ~/.config/Aeth/config.toml
-
-# Edit to customize
-$EDITOR ~/.config/Aeth/config.toml
 ```
 
-For detailed configuration options, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
 
 ---
 
 ## Documentation
 
--   [Configuration Guide](docs/CONFIGURATION.md) - Customize prompts, colors, and settings
--   [Architecture Overview](docs/ARCHITECTURE.md) - Understanding the hybrid shell design
-
----
-
-## Current Limitations
-
-This is an early prototype. Known limitations:
-
--   Multi-stage raw pipelines are delegated to `/bin/sh -c`
--   Structured pipelines (`@a | @b`) not yet fully implemented
--   Limited I/O redirection support (`<`, `>`, `2>`)
--   Small set of built-in structured commands
+-   [Configuration Guide](docs/CONFIGURATION.md)
+-   [Architecture Overview](docs/ARCHITECTURE.md)
 
 ---
 
 ## Roadmap
 
-### Completed ✅
+### Completed
 
--   [x] Fast startup (~25ms)
--   [x] Tab completion (commands + paths)
--   [x] Proper quoting support
--   [x] Environment variable expansion
--   [x] Signal handling (Ctrl+C, Ctrl+D)
--   [x] IDE/AI compatibility
--   [x] Configurable prompts
+-   Fast startup (~25ms)
+-   Tab completion
+-   Proper quoting support
+-   Environment variable expansion
+-   Signal handling
+-   Configurable prompts
+-   Command history with arrow navigation
+-   Visual file/directory distinction
+-   Structured commands (@ls, @ps, @df, @env, @find)
+-   Structured transformations (filter, sort, select)
+-   Command aliases
 
-### Next Milestones
+### Planned
 
-1. I/O redirection (`<`, `>`, `>>`, `2>`)
-2. Job control (background processes, `&`, `fg`, `bg`)
-3. Command aliases
-4. More structured commands (`@find`, `@ps`, `@df`)
-5. Structured pipeline chaining (`@ls | @filter | @sort`)
-
----
-
-## Contributing
-
-Please read the [architecture docs](docs/ARCHITECTURE.md) to understand the basic design.
+-   Full I/O redirection
+-   Job control (fg, bg)
+-   Syntax highlighting
+-   Auto-suggestions
 
 ---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE) file.

@@ -62,10 +62,11 @@ run = do
     Just e -> TIO.hPutStrLn stderr ("Aeth: " <> T.pack e)
 
   -- Run the shell with haskeline
-  let hlSettings = makeHaskelineSettings cfg
+  histPath <- historyFilePath
+  let hlSettings = makeHaskelineSettings cfg histPath
   HL.runInputT hlSettings $ do
     -- Source rc file
-    liftIO $ runStartup st0
+    liftIO $ runStartup cfg st0
     -- Enter main loop
     mainLoop cfg
 
@@ -75,7 +76,12 @@ runCommandLine line = do
   initialCwd <- Dir.getCurrentDirectory
   env0 <- Env.getEnvironment
   let st0 = emptyShellState initialCwd (Map.fromList env0)
-  evalStateT (runOne (T.pack line)) st0
+  (cfg, errs) <- loadConfig
+  -- Surface config errors to stderr
+  case errs of
+    Just err -> TIO.hPutStrLn stderr ("Aeth: config: " <> T.pack err)
+    Nothing -> pure ()
+  evalStateT (runOne cfg (T.pack line)) st0
 
 -- | Install signal handlers
 installSignalHandlers :: IO ()
@@ -87,12 +93,12 @@ installSignalHandlers = do
   return ()
 
 -- | Create haskeline settings with completion
-makeHaskelineSettings :: ShellConfig -> HL.Settings IO
-makeHaskelineSettings _cfg =
+makeHaskelineSettings :: ShellConfig -> FilePath -> HL.Settings IO
+makeHaskelineSettings _cfg histPath =
   HL.Settings
     { HL.complete = shellCompleter,
-      HL.historyFile = Nothing, -- We handle history ourselves
-      HL.autoAddHistory = False -- We handle history ourselves
+      HL.historyFile = Just histPath, -- Enable haskeline history for up-arrow
+      HL.autoAddHistory = True -- Let haskeline handle history
     }
 
 -- | Tab completer for shell commands
@@ -198,24 +204,23 @@ mainLoop cfg = go
         Nothing -> return () -- EOF (Ctrl+D)
         Just "" -> go -- Empty line
         Just line -> do
-          -- Add to history
-          liftIO $ appendHistory line
+          -- Update internal history for shell access
           liftIO $ modifyIORef' globalStateRef (\s -> s {history = history s ++ [line]})
 
           -- Execute
-          liftIO $ runLineWithState line
+          liftIO $ runLineWithState line cfg
           go
 
 -- | Run a line and update global state
-runLineWithState :: String -> IO ()
-runLineWithState line = do
+runLineWithState :: String -> ShellConfig -> IO ()
+runLineWithState line cfg = do
   st <- readIORef globalStateRef
-  ((), newSt) <- runStateT (runOne (T.pack line)) st
+  ((), newSt) <- runStateT (runOne cfg (T.pack line)) st
   writeIORef globalStateRef newSt
 
 -- | Run startup (rc file, history)
-runStartup :: ShellState -> IO ()
-runStartup st0 = do
+runStartup :: ShellConfig -> ShellState -> IO ()
+runStartup cfg st0 = do
   writeIORef globalStateRef st0
 
   -- Source rc file
@@ -224,7 +229,7 @@ runStartup st0 = do
   when exists $ do
     contents <- TIO.readFile path
     let ls = filter (not . T.null) (map stripComments (T.lines contents))
-    mapM_ (\l -> runLineWithState (T.unpack l)) ls
+    mapM_ (\l -> runLineWithState (T.unpack l) cfg) ls
 
   -- Load history
   hist <- readHistory
@@ -233,8 +238,8 @@ runStartup st0 = do
     stripComments t = T.strip (T.takeWhile (/= '#') t)
 
 -- | Execute a single command/pipeline
-runOne :: (MonadIO m) => T.Text -> StateT ShellState m ()
-runOne t =
+runOne :: (MonadIO m) => ShellConfig -> T.Text -> StateT ShellState m ()
+runOne cfg t =
   case parsePipeline t of
     Left e ->
       if e == "empty"
@@ -244,7 +249,7 @@ runOne t =
           liftIO $ TIO.hPutStrLn stderr ("Aeth: parse: " <> T.pack e)
     Right p -> do
       start <- liftIO getCurrentTime
-      runPipeline p
+      runPipeline (aliases cfg) p
       end <- liftIO getCurrentTime
       let ms = max 0 (floor (realToFrac (diffUTCTime end start) * (1000 :: Double)) :: Int)
       modify' (\st -> st {lastDurationMs = Just ms})

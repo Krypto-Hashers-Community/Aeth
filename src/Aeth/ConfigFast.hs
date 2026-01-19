@@ -44,7 +44,10 @@ data ShellConfig = ShellConfig
     showExitCode :: Bool,
     showDuration :: Bool,
     promptColors :: PromptColors,
-    aliases :: Map.Map T.Text T.Text
+    aliases :: Map.Map T.Text T.Text,
+    customPrompt :: Maybe T.Text, -- Custom prompt format string
+    safeMode :: Bool, -- Restrict dangerous commands
+    historySize :: Int -- Max history entries
   }
   deriving (Eq, Show)
 
@@ -56,6 +59,7 @@ data PromptStyle
   = MinimalPrompt -- cwd >
   | PowerlinePrompt -- Fancy with colors
   | SimplePrompt -- user@host:cwd$
+  | CustomPrompt -- User-defined format
   deriving (Eq, Show)
 
 data PromptColors = PromptColors
@@ -84,7 +88,10 @@ defaultConfig =
       showExitCode = True,
       showDuration = False,
       promptColors = defaultPromptColors,
-      aliases = Map.empty
+      aliases = Map.empty,
+      customPrompt = Nothing,
+      safeMode = False,
+      historySize = 10000
     }
 
 -- | Load configuration - simple and fast!
@@ -111,14 +118,24 @@ parseConfigLines ls = foldr applyLine defaultConfig ls
       let stripped = T.strip line
        in if T.null stripped || T.isPrefixOf "#" stripped
             then cfg
-            else case T.breakOn "=" stripped of
-              (key, val)
-                | T.null val -> cfg
-                | otherwise ->
-                    let k = T.strip key
-                        v = T.strip (T.drop 1 val) -- drop the '='
-                        vUnquoted = unquote v
-                     in applySetting k vUnquoted cfg
+            -- Handle alias definitions: alias.name = "value"
+            else
+              if T.isPrefixOf "alias." stripped
+                then case T.breakOn "=" stripped of
+                  (key, val)
+                    | T.null val -> cfg
+                    | otherwise ->
+                        let aliasName = T.drop 6 (T.strip key) -- Remove "alias."
+                            aliasVal = unquote (T.strip (T.drop 1 val))
+                         in cfg {aliases = Map.insert aliasName aliasVal (aliases cfg)}
+                else case T.breakOn "=" stripped of
+                  (key, val)
+                    | T.null val -> cfg
+                    | otherwise ->
+                        let k = T.strip key
+                            v = T.strip (T.drop 1 val) -- drop the '='
+                            vUnquoted = unquote v
+                         in applySetting k vUnquoted cfg
 
     unquote t =
       let s = T.unpack t
@@ -138,6 +155,9 @@ parseConfigLines ls = foldr applyLine defaultConfig ls
         "git_color" -> cfg {promptColors = (promptColors cfg) {gitColor = T.unpack val}}
         "error_color" -> cfg {promptColors = (promptColors cfg) {errorColor = T.unpack val}}
         "success_color" -> cfg {promptColors = (promptColors cfg) {successColor = T.unpack val}}
+        "prompt" -> cfg {customPrompt = Just val, promptStyle = CustomPrompt}
+        "safe_mode" -> cfg {safeMode = parseBool val}
+        "history_size" -> cfg {historySize = parseIntDefault 10000 val}
         -- Ignore unknown/legacy keys like use_dynamic_prompt
         _ -> cfg
 
@@ -150,6 +170,7 @@ parseConfigLines ls = foldr applyLine defaultConfig ls
       case T.toLower t of
         "powerline" -> PowerlinePrompt
         "simple" -> SimplePrompt
+        "custom" -> CustomPrompt
         _ -> MinimalPrompt
 
     parseBool t =
@@ -158,6 +179,12 @@ parseConfigLines ls = foldr applyLine defaultConfig ls
         "yes" -> True
         "1" -> True
         _ -> False
+
+    -- \| Parse an integer with a default; clamps to non-negative so negative inputs are treated as zero.
+    parseIntDefault def t =
+      case reads (T.unpack t) :: [(Int, String)] of
+        [(n, "")] -> max 0 n
+        _ -> def
 
 -- | Create a default config file
 createDefaultConfig :: FilePath -> IO ()
@@ -170,9 +197,17 @@ defaultConfigContent :: T.Text
 defaultConfigContent =
   T.unlines
     [ "# Aeth Shell Configuration",
+      "# See docs/CONFIGURATION.md for full documentation",
       "",
-      "ui_mode = \"normal\"        # 'normal' or 'tui' (fullscreen)",
-      "prompt_style = \"minimal\"  # 'minimal', 'powerline', or 'simple'",
+      "# UI Mode: 'normal' or 'tui' (fullscreen)",
+      "ui_mode = \"normal\"",
+      "",
+      "# Prompt Style: 'minimal', 'powerline', 'simple', or 'custom'",
+      "prompt_style = \"minimal\"",
+      "",
+      "# Custom prompt format (only used when prompt_style = 'custom')",
+      "# Available placeholders: {cwd}, {user}, {host}, {branch}, {exit}, {git}",
+      "# prompt = \"{user}@{host}:{cwd} {git}$ \"",
       "",
       "# Prompt features",
       "show_git_branch = true",
@@ -183,7 +218,13 @@ defaultConfigContent =
       "cwd_color = \"cyan\"",
       "git_color = \"magenta\"",
       "error_color = \"red\"",
-      "success_color = \"green\""
+      "success_color = \"green\"",
+      "",
+      "# Security",
+      "safe_mode = false",
+      "",
+      "# History",
+      "history_size = 10000"
     ]
 
 -- | Build the prompt function from config
@@ -223,6 +264,37 @@ mkPromptFunction cfg st = do
       host <- getHostname
       let prompt = user ++ "@" ++ host ++ ":" ++ prettyCwd ++ "$ "
       pure prompt
+    CustomPrompt -> do
+      -- Custom prompt with format string substitution
+      user <- Env.lookupEnv "USER" >>= pure . fromMaybe "user"
+      host <- getHostname
+      let branchStr = fromMaybe "" branch
+          exitStr = if exitOk then "0" else show (lastExitCode st)
+          template = T.unpack (fromMaybe "{cwd} > " (customPrompt cfg))
+          -- Substitute placeholders
+          result =
+            substitute
+              template
+              [ ("{cwd}", prettyCwd),
+                ("{user}", user),
+                ("{host}", host),
+                ("{branch}", branchStr),
+                ("{exit}", exitStr),
+                ("{git}", if null branchStr then "" else "(" ++ branchStr ++ ")")
+              ]
+      pure result
+  where
+    substitute :: String -> [(String, String)] -> String
+    substitute s [] = s
+    substitute s ((pat, repl) : rest) = substitute (replaceAll pat repl s) rest
+
+    replaceAll :: String -> String -> String -> String
+    replaceAll pat repl s =
+      case stripPrefix pat s of
+        Just rest -> repl ++ replaceAll pat repl rest
+        Nothing -> case s of
+          [] -> []
+          (c : cs) -> c : replaceAll pat repl cs
 
 -- | Get hostname
 getHostname :: IO String

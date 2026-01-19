@@ -1,18 +1,18 @@
 # Architecture Overview
 
-This document explains the internal design of Aeth and how the hybrid shell concept is implemented.
+This document explains the internal design of Aeth.
 
 ## Core Concept
 
-Aeth is built on **polymorphic command execution**. Every command can operate in one of two modes:
+Aeth supports polymorphic command execution in two modes:
 
 1. **Raw Mode:** Traditional string-based I/O (like Bash)
 2. **Structured Mode:** Type-safe data structures (like Nushell)
 
 The user chooses the mode with a prefix:
 
--   `ls` → Raw mode (returns text)
--   `@ls` → Structured mode (returns `StructuredValue`)
+-   `ls` - Raw mode (returns text)
+-   `@ls` - Structured mode (returns table data)
 
 ---
 
@@ -20,29 +20,15 @@ The user chooses the mode with a prefix:
 
 ```
 app/
-  Main.hs                    -- Entry point, argument parsing
+  Main.hs                    -- Entry point
 
 src/Aeth/
-  Types.hs                   -- Core types (OutputMode, Segment, Pipeline, ShellState)
-  Parse.hs                   -- Parser with quoting support
-  ParseMegaparsec.hs         -- Megaparsec-based parser (alternative)
-  Exec.hs                    -- Command execution (raw & structured)
+  Types.hs                   -- Core types
+  Parse.hs                   -- Command parser
+  Exec.hs                    -- Command execution
   Structured.hs              -- Structured value types and commands
-
-  # Fast Shell (Default)
-  ShellFast.hs               -- Main shell using haskeline
-  ConfigFast.hs              -- Simple TOML-like config parser
-
-  # Legacy Shell (--legacy flag)
-  Shell.hs                   -- Legacy REPL with hint-based config
-  Config.hs                  -- Dynamic config loading via GHC interpreter
-  LineEditor.hs              -- Custom line editor
-  LineEditorVty.hs           -- Vty-based fullscreen UI
-
-config/
-  config.toml                -- Configuration template
-  rc                         -- Startup commands template
-  config.hs.legacy           -- Legacy Haskell config template
+  ShellFast.hs               -- Main shell (haskeline-based)
+  ConfigFast.hs              -- Simple key=value config parser
 ```
 
 ---
@@ -52,10 +38,7 @@ config/
 ### OutputMode
 
 ```haskell
-data OutputMode
-  = RawString    -- Traditional text output
-  | Structured   -- Structured data (tables, records)
-  deriving (Eq, Show)
+data OutputMode = RawString | Structured
 ```
 
 ### Segment
@@ -64,9 +47,9 @@ A single command in a pipeline:
 
 ```haskell
 data Segment = Segment
-  { segMode :: OutputMode     -- Raw or Structured
-  , segName :: T.Text         -- Command name (e.g., "ls", "@ls")
-  , segArgs :: [T.Text]       -- Arguments
+  { segMode :: OutputMode
+  , segName :: T.Text
+  , segArgs :: [T.Text]
   }
 ```
 
@@ -81,9 +64,11 @@ newtype Pipeline = Pipeline { unPipeline :: [Segment] }
 ```haskell
 data ShellState = ShellState
   { cwd            :: FilePath
-  , envOverrides   :: Map.Map String String
+  , envOverrides   :: Map String String
   , lastExitCode   :: Int
   , lastDurationMs :: Maybe Int
+  , history        :: [String]
+  , backgroundJobs :: [BackgroundJob]
   }
 ```
 
@@ -92,196 +77,97 @@ data ShellState = ShellState
 ```haskell
 data StructuredValue
   = SText T.Text
-  | STable [T.Text] [[T.Text]]  -- Headers + rows
-  deriving (Eq, Show)
+  | STable [T.Text] [[T.Text]]
 ```
 
 ---
 
 ## Execution Flow
 
-### 1. User Input
+1. **User Input:** `@ls /home | filter { .size > 1MB }`
 
-```
-User types: @ls /home | filter { .size > 1MB }
-```
+2. **Parsing:** Tokenize and split into segments:
 
-### 2. Parsing
+    ```haskell
+    Pipeline [
+      Segment Structured "ls" ["/home"],
+      Segment Structured "filter" ["{", ".size", ">", "1MB", "}"]
+    ]
+    ```
 
-The parser (`Parse.hs`) tokenizes with quote support and splits into segments:
+3. **Alias Expansion:** Replace aliases with their definitions
 
-```haskell
-Pipeline [
-  Segment Structured "@ls" ["/home"],
-  Segment Structured "filter" ["{", ".size", ">", "1MB", "}"]
-]
-```
+4. **Execution:**
 
-### 3. Execution
+    - Raw Mode: Resolve in `$PATH`, fork process
+    - Structured Mode: Look up in registry, return `StructuredValue`
 
-The executor (`Exec.hs`) processes each segment:
-
-**Raw Mode:**
-
--   Resolves command in `$PATH`
--   Forks process with `System.Process`
--   Connects stdio pipes if part of pipeline
-
-**Structured Mode:**
-
--   Looks up in structured registry: `@ls`, `@pwd`, `@ps`, `@env`, `filter`, `select`
--   Returns `StructuredValue`
--   Renders as table
-
-### 4. Built-ins
-
-```haskell
-case cmd of
-  "cd"     -> builtin_cd args
-  "exit"   -> builtin_exit
-  "export" -> builtin_export args
-  _        -> executeExternal cmd args
-```
+5. **Pipeline Chaining:** Pass output between stages
 
 ---
 
-## Configuration System
+## Built-in Commands
 
-### Fast Config (Default)
+Handled directly in `runRawSingle`:
 
-`ConfigFast.hs` uses a simple line-based parser:
-
-```haskell
-parseConfigLines :: [T.Text] -> Map.Map T.Text T.Text
-```
-
-Parses `key = value` format without external dependencies. **Startup: ~25ms**
-
-### Legacy Config
-
-`Config.hs` uses the `hint` library to interpret Haskell code at runtime. This allows arbitrary Haskell in configuration but causes **2-5 second startup delays**.
-
-Enabled via `aeth --legacy`.
-
----
-
-## Shell Modes
-
-### ShellFast (Default)
-
-Uses `haskeline` for line editing:
-
-```haskell
-mainLoop :: PromptFunction -> InputT IO ()
-mainLoop promptFn = loop
-  where
-    loop = do
-      st <- liftIO $ readIORef globalStateRef
-      prompt <- liftIO $ promptFn st
-      minput <- getInputLine prompt
-      case minput of
-        Nothing -> return ()
-        Just line -> do
-          liftIO $ executeOneLine (T.pack line)
-          loop
-```
-
-Features:
-
--   Readline-style editing (Emacs/Vi)
--   History search (Ctrl-R)
--   Tab completion for commands and files
--   Proper PTY support (AI/Copilot compatible)
--   Signal handling (Ctrl-C, Ctrl-Z)
-
-### Legacy Shell
-
-Uses custom `LineEditor` with raw terminal mode. Has issues with:
-
--   AI assistants can't execute commands
--   Terminal state not always restored on exit
+-   `cd`, `exit`, `export`, `unset`
+-   `pwd`, `history`, `clear`
+-   `source`, `type`, `which`, `echo`
+-   `true`, `false`, `jobs`
 
 ---
 
 ## Structured Commands
 
-### @ls
+| Command | Function         |
+| ------- | ---------------- |
+| `@ls`   | `lsStructured`   |
+| `@ps`   | `psStructured`   |
+| `@df`   | `dfStructured`   |
+| `@env`  | `envStructured`  |
+| `@find` | `findStructured` |
+
+### Transformations
+
+| Transform | Function           |
+| --------- | ------------------ |
+| `filter`  | `filterStructured` |
+| `sort`    | `sortStructured`   |
+| `select`  | `selectStructured` |
+
+---
+
+## Configuration
+
+`ConfigFast.hs` uses simple key=value parsing (no external TOML library).
+Config files use TOML-like syntax but are parsed with a lightweight internal parser:
 
 ```haskell
-lsStructured :: FilePath -> IO StructuredValue
-lsStructured path = do
-  entries <- Dir.listDirectory path
-  rows <- mapM (fileInfo path) entries
-  pure (STable ["name", "kind", "size"] rows)
+parseConfigLines :: [T.Text] -> ShellConfig
 ```
 
-### @ps
+Supports:
 
-```haskell
-psStructured :: IO StructuredValue
-psStructured = do
-  output <- readProcess "ps" ["aux"] ""
-  let rows = map (take 11 . words) (tail $ lines output)
-  pure (STable psHeaders rows)
-```
-
-### filter
-
-```haskell
-filterStructured :: T.Text -> StructuredValue -> Either T.Text StructuredValue
-filterStructured expr (STable headers rows) = do
-  (field, op, literal) <- parsePredicate expr
-  idx <- findFieldIndex field headers
-  pure (STable headers (filter (evalPredicate op literal idx) rows))
-```
-
-Operators: `==`, `!=`, `>`, `>=`, `<`, `<=`, `contains`
+-   Prompt settings
+-   Colors
+-   Aliases (`alias.name = "command"`)
+-   Security options
 
 ---
 
 ## Performance
 
-| Component            | Time                          |
-| -------------------- | ----------------------------- |
-| Fast shell startup   | ~25ms                         |
-| Legacy shell startup | 2-5s                          |
-| Prompt generation    | ~10-50ms (with git detection) |
-| Structured commands  | ~1-10ms                       |
+| Component           | Time     |
+| ------------------- | -------- |
+| Shell startup       | ~25ms    |
+| Prompt generation   | ~10-50ms |
+| Structured commands | ~1-10ms  |
 
 ---
 
 ## Design Principles
 
-1. **Safety Through Types** - Haskell prevents many runtime errors
-2. **Explicit Mode Selection** - `@` prefix makes structured mode clear
-3. **Interoperability** - Raw mode works with all Unix tools
-4. **Functional State** - `StateT` keeps state clean without globals
-5. **Fast by Default** - Simple config, quick startup
-
----
-
-## Future Plans
-
--   Full quoting/escaping parser (Megaparsec)
--   Type-aware structured piping (`@ls | @filter`)
--   More structured commands (`@git-status`, `@docker`)
--   Rich table rendering (sorting, pagination)
--   Plugin system for custom commands
-
----
-
-## References
-
-### Inspiration
-
--   **Bash/Zsh** - Raw mode semantics
--   **Nushell** - Structured data concept
--   **Fish** - User experience
--   **Xonsh** - Hybrid shell idea
-
-### Haskell Libraries
-
--   `haskeline` - Line editing
--   `vty` - Terminal UI
--   `process` - Process management
--   `mtl` - Monad transformers
+1. **Type Safety:** Haskell prevents runtime errors
+2. **Explicit Modes:** `@` prefix makes structured mode clear
+3. **Interoperability:** Raw mode works with all Unix tools
+4. **Fast Startup:** Simple config, no interpreter overhead

@@ -6,16 +6,32 @@ module Aeth.Structured
     lsStructured,
     pwdStructured,
     filterStructured,
+    psStructured,
+    dfStructured,
+    envStructured,
+    findStructured,
+    sortStructured,
+    selectStructured,
+    LsOptions (..),
+    defaultLsOptions,
+    parseLsArgs,
   )
 where
 
+import Control.Exception (IOException, try)
 import Data.Char (isDigit, toLower)
 import Data.Int (Int64)
 import qualified Data.List as List
+import Data.Maybe (fromMaybe)
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified System.Directory as Dir
+import qualified System.Environment as Env
 import qualified System.FilePath as FP
 import qualified System.Posix.Files as Posix
+import System.Posix.Types (DeviceID, FileID, FileMode)
+import qualified System.Process as Proc
+import Text.Printf (printf)
 
 -- Keep it simple: a small structured algebra we can extend.
 
@@ -23,6 +39,49 @@ data StructuredValue
   = SText T.Text
   | STable [T.Text] [[T.Text]]
   deriving (Eq, Show)
+
+-- | Options for @ls command
+data LsOptions = LsOptions
+  { lsShowAll :: Bool, -- -a: show hidden files
+    lsLongFormat :: Bool, -- -l: long format with details
+    lsHumanReadable :: Bool, -- -h: human readable sizes
+    lsSortBySize :: Bool, -- -S: sort by size
+    lsSortByTime :: Bool, -- -t: sort by modification time
+    lsReverse :: Bool -- -r: reverse sort order
+  }
+  deriving (Eq, Show)
+
+defaultLsOptions :: LsOptions
+defaultLsOptions =
+  LsOptions
+    { lsShowAll = False,
+      lsLongFormat = False,
+      lsHumanReadable = True,
+      lsSortBySize = False,
+      lsSortByTime = False,
+      lsReverse = False
+    }
+
+-- | Parse ls command line arguments
+parseLsArgs :: [T.Text] -> (LsOptions, [T.Text])
+parseLsArgs args = (opts, paths)
+  where
+    (flags, paths) = List.partition (T.isPrefixOf "-") args
+    opts = foldr applyFlag defaultLsOptions flags
+
+    -- Apply all flag characters cumulatively so "-la" enables both -l and -a
+    applyFlag flag o =
+      let chars = T.unpack (T.drop 1 flag) -- drop leading '-'
+       in foldl applyOneFlag o chars
+
+    applyOneFlag o c = case c of
+      'a' -> o {lsShowAll = True}
+      'l' -> o {lsLongFormat = True}
+      'h' -> o {lsHumanReadable = True}
+      'S' -> o {lsSortBySize = True}
+      't' -> o {lsSortByTime = True}
+      'r' -> o {lsReverse = True}
+      _ -> o -- ignore unknown flags
 
 -- | Filter a structured table with a tiny expression language.
 --
@@ -161,26 +220,248 @@ renderStructured v =
     pad :: Int -> T.Text -> T.Text
     pad w t = t <> T.replicate (w - T.length t) " "
 
-lsStructured :: FilePath -> IO StructuredValue
-lsStructured dirPath0 = do
+-- | Format file size for display (human readable)
+formatSize :: Int64 -> T.Text
+formatSize bytes
+  | bytes >= 1073741824 = T.pack $ printf "%.1fG" (fromIntegral bytes / 1073741824 :: Double)
+  | bytes >= 1048576 = T.pack $ printf "%.1fM" (fromIntegral bytes / 1048576 :: Double)
+  | bytes >= 1024 = T.pack $ printf "%.1fK" (fromIntegral bytes / 1024 :: Double)
+  | otherwise = T.pack $ show bytes <> "B"
+
+-- | Add visual indicator for file type
+formatKind :: Bool -> String -> T.Text
+formatKind isDir name
+  | isDir = T.pack name <> "/" -- Append / to directories
+  | otherwise = T.pack name
+
+lsStructured :: LsOptions -> FilePath -> IO StructuredValue
+lsStructured opts dirPath0 = do
   dirPath <- expandTilde dirPath0
-  names <- Dir.listDirectory dirPath
-  let sorted = List.sort names
-  rows <-
-    mapM
-      ( \n -> do
-          let fullPath = dirPath FP.</> n
+  listResult <- try (Dir.listDirectory dirPath) :: IO (Either IOException [FilePath])
+  case listResult of
+    Left e -> pure (SText ("ls: " <> T.pack (show e)))
+    Right allNames -> do
+      -- Filter hidden files unless -a flag is set
+      let names =
+            if lsShowAll opts
+              then allNames
+              else filter (not . List.isPrefixOf ".") allNames
+      let sorted = List.sort names
+      rowResults <- mapM (mkRow dirPath) sorted
+      let rows = [r | Right r <- rowResults] -- skip entries that failed
+      -- Sort by size or time if requested
+      let sortedRows = applySorting opts rows
+      -- Remove the internal mtime column before returning (it's index 4)
+      let visibleRows = map (take 4) sortedRows
+      pure (STable ["name", "kind", "size", "permissions"] visibleRows)
+  where
+    mkRow dirPath n = do
+      let fullPath = dirPath FP.</> n
+      result <- try (Posix.getFileStatus fullPath) :: IO (Either IOException Posix.FileStatus)
+      case result of
+        Left _ -> do
+          -- On error, produce a row with error indicators
+          isDirResult <- try (Dir.doesDirectoryExist fullPath) :: IO (Either IOException Bool)
+          let isDir = either (const False) id isDirResult
+              displayName = formatKind isDir n <> " [error]"
+          pure (Right [displayName, "-", "-", "-", "0"])
+        Right st -> do
           isDir <- Dir.doesDirectoryExist fullPath
-          st <- Posix.getFileStatus fullPath
           let kind = if isDir then "dir" else "file"
               sz = Posix.fileSize st
-          pure [T.pack n, T.pack kind, T.pack (show sz)]
-      )
-      sorted
-  pure (STable ["name", "kind", "size"] rows)
+              sizeStr = if lsHumanReadable opts then formatSize (fromIntegral sz) else T.pack (show sz)
+              perms = formatPermissions (Posix.fileMode st)
+              displayName = formatKind isDir n
+              -- Store mtime as epoch seconds for sorting (hidden column)
+              mtime = Posix.modificationTime st
+              mtimeStr = T.pack (show mtime)
+          pure (Right [displayName, T.pack kind, sizeStr, perms, mtimeStr])
+
+    applySorting o rows
+      | lsSortByTime o = sortByColumn 4 rows (lsReverse o) -- sort by mtime (column 4)
+      | lsSortBySize o = sortByColumn 2 rows (lsReverse o) -- sort by size (column 2)
+      | otherwise = if lsReverse o then reverse rows else rows
+
+    sortByColumn idx rs rev =
+      let sorted = List.sortBy (\a b -> compare (parseNum (a !! idx)) (parseNum (b !! idx))) rs
+       in if rev then reverse sorted else sorted
+
+    parseNum t = fromMaybe 0 (parseSizeBytes t)
+
+-- | Format Unix permissions
+formatPermissions :: FileMode -> T.Text
+formatPermissions mode =
+  T.pack $
+    [ if Posix.ownerReadMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'r' else '-',
+      if Posix.ownerWriteMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'w' else '-',
+      if Posix.ownerExecuteMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'x' else '-',
+      if Posix.groupReadMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'r' else '-',
+      if Posix.groupWriteMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'w' else '-',
+      if Posix.groupExecuteMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'x' else '-',
+      if Posix.otherReadMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'r' else '-',
+      if Posix.otherWriteMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'w' else '-',
+      if Posix.otherExecuteMode `Posix.intersectFileModes` mode /= Posix.nullFileMode then 'x' else '-'
+    ]
 
 pwdStructured :: FilePath -> IO StructuredValue
 pwdStructured dirPath = pure (SText (T.pack dirPath))
+
+-- | @ps - process list
+psStructured :: IO StructuredValue
+psStructured = do
+  result <- try (Proc.readCreateProcess (Proc.proc "ps" ["aux"]) "") :: IO (Either IOException String)
+  case result of
+    Left _ -> pure (SText "Error: could not read process list")
+    Right output -> do
+      let lns = lines output
+      case lns of
+        [] -> pure (STable ["PID", "USER", "%CPU", "%MEM", "COMMAND"] [])
+        (_hdr : rest) -> do
+          let rows = map parsePs rest
+          pure (STable ["PID", "USER", "%CPU", "%MEM", "COMMAND"] rows)
+  where
+    parsePs line =
+      let ws = words line
+       in case ws of
+            (user : pid : cpu : mem : _vsz : _rss : _tty : _stat : _start : _time : cmd) ->
+              [T.pack pid, T.pack user, T.pack cpu, T.pack mem, T.pack (unwords cmd)]
+            _ -> [T.pack line, "", "", "", ""]
+
+-- | @df - disk space
+dfStructured :: IO StructuredValue
+dfStructured = do
+  result <- try (Proc.readCreateProcess (Proc.proc "df" ["-h"]) "") :: IO (Either IOException String)
+  case result of
+    Left _ -> pure (SText "Error: could not read disk usage")
+    Right output -> do
+      let lns = lines output
+      case lns of
+        [] -> pure (STable ["Filesystem", "Size", "Used", "Avail", "Use%", "Mount"] [])
+        (_hdr : rest) -> do
+          let rows = map parseDf rest
+          pure (STable ["Filesystem", "Size", "Used", "Avail", "Use%", "Mount"] rows)
+  where
+    -- Parse df line: first 5 fields are fs,size,used,avail,pct; remainder is mount path (may contain spaces)
+    parseDf line =
+      let ws = words line
+       in case ws of
+            (fs : size : used : avail : pct : mountParts) ->
+              [T.pack fs, T.pack size, T.pack used, T.pack avail, T.pack pct, T.pack (unwords mountParts)]
+            _ -> replicate 6 ""
+
+-- | @env - environment variables
+envStructured :: IO StructuredValue
+envStructured = do
+  env <- Env.getEnvironment
+  let rows = map (\(k, v) -> [T.pack k, T.pack v]) (List.sortBy (\a b -> compare (fst a) (fst b)) env)
+  pure (STable ["Variable", "Value"] rows)
+
+-- | @find - find files
+findStructured :: FilePath -> [T.Text] -> IO StructuredValue
+findStructured basePath patterns = do
+  path <- expandTilde basePath
+  allFiles <- findFilesRecursive path
+  let namePattern = if null patterns then "*" else T.unpack (head patterns)
+  let matches = filter (matchGlobSimple namePattern . FP.takeFileName) allFiles
+  let rows = map (\f -> [T.pack f]) (take 1000 matches) -- Limit results
+  pure (STable ["path"] rows)
+
+-- | Recursively find files, avoiding symlink loops and handling permission errors
+findFilesRecursive :: FilePath -> IO [FilePath]
+findFilesRecursive dir = findFilesRecursive' Set.empty dir
+
+-- | Internal recursive find with visited set to avoid symlink cycles
+findFilesRecursive' :: Set.Set (DeviceID, FileID) -> FilePath -> IO [FilePath]
+findFilesRecursive' visited dir = do
+  existsResult <- try (Dir.doesDirectoryExist dir) :: IO (Either IOException Bool)
+  case existsResult of
+    Left _ -> pure []
+    Right False -> pure []
+    Right True -> do
+      listResult <- try (Dir.listDirectory dir) :: IO (Either IOException [FilePath])
+      case listResult of
+        Left _ -> pure [] -- Permission denied or other IO error
+        Right entries -> do
+          let fullPaths = map (dir FP.</>) entries
+          subResults <- mapM (processEntry visited) fullPaths
+          pure (concat subResults)
+  where
+    processEntry vis path = do
+      -- Use getSymbolicLinkStatus to detect symlinks without following them
+      statResult <- try (Posix.getSymbolicLinkStatus path) :: IO (Either IOException Posix.FileStatus)
+      case statResult of
+        Left _ -> pure [path] -- On error, just return the path without recursing
+        Right st -> do
+          let devIno = (Posix.deviceID st, Posix.fileID st)
+          if Set.member devIno vis
+            then pure [] -- Already visited, skip to avoid cycle
+            else
+              if Posix.isSymbolicLink st
+                then pure [path] -- It's a symlink, include it but don't descend
+                else
+                  if Posix.isDirectory st
+                    then do
+                      let newVis = Set.insert devIno vis
+                      subFiles <- findFilesRecursive' newVis path
+                      pure (path : subFiles)
+                    else pure [path]
+
+matchGlobSimple :: String -> String -> Bool
+matchGlobSimple "*" _ = True
+matchGlobSimple pat str = matchGlob pat str
+
+-- | Simple glob pattern matching
+matchGlob :: String -> String -> Bool
+matchGlob pat str = go pat str
+  where
+    go [] [] = True
+    go [] _ = False
+    go ('*' : ps) s = any (go ps) (suffixes s)
+    go ('?' : ps) (_ : ss) = go ps ss
+    go ('?' : _) [] = False
+    go (p : ps) (c : cs) = p == c && go ps cs
+    go _ [] = False
+
+    suffixes :: String -> [String]
+    suffixes s =
+      s : case s of
+        [] -> []
+        (_ : xs) -> suffixes xs
+
+-- | @sort - sort table by column
+sortStructured :: T.Text -> StructuredValue -> Either T.Text StructuredValue
+sortStructured colExpr v =
+  case v of
+    SText _ -> Left "sort: expected table input"
+    STable headers rows -> do
+      let col = T.strip $ T.dropWhile (== '.') colExpr
+      idx <- maybe (Left ("sort: unknown column: " <> col)) Right (List.elemIndex col headers)
+      let sorted = List.sortBy (\a b -> compare (a !! idx) (b !! idx)) rows
+      pure (STable headers sorted)
+
+-- | select - select specific columns
+selectStructured :: [T.Text] -> StructuredValue -> Either T.Text StructuredValue
+selectStructured cols v =
+  case v of
+    SText _ -> Left "select: expected table input"
+    STable headers rows -> do
+      let colNames = map (T.strip . T.dropWhile (== '.')) cols
+      indices <- mapM (\c -> maybe (Left ("select: unknown column: " <> c)) Right (List.elemIndex c headers)) colNames
+      -- Validate all rows have enough columns
+      let requiredMaxIndex = if null indices then 0 else maximum indices
+      case findShortRow requiredMaxIndex 0 rows of
+        Just (rowNum, rowLen) ->
+          Left ("select: row " <> T.pack (show rowNum) <> " too short (has " <> T.pack (show rowLen) <> " columns, need " <> T.pack (show (requiredMaxIndex + 1)) <> ")")
+        Nothing -> do
+          let newHeaders = map (headers !!) indices
+              newRows = map (\r -> map (r !!) indices) rows
+          pure (STable newHeaders newRows)
+  where
+    findShortRow :: Int -> Int -> [[T.Text]] -> Maybe (Int, Int)
+    findShortRow _ _ [] = Nothing
+    findShortRow maxIdx rowNum (r : rs)
+      | length r <= maxIdx = Just (rowNum, length r)
+      | otherwise = findShortRow maxIdx (rowNum + 1) rs
 
 expandTilde :: FilePath -> IO FilePath
 expandTilde p
