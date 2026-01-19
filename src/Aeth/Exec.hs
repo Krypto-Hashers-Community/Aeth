@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Aeth.Exec
   ( runPipeline,
@@ -6,10 +7,11 @@ module Aeth.Exec
   )
 where
 
+import Aeth.Parse (parsePipeline)
 import Aeth.Structured
 import Aeth.Types
 import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (StateT, get, put)
@@ -25,6 +27,26 @@ import System.IO (hClose, stderr)
 import System.Posix.Process (executeFile, forkProcess, getProcessStatus)
 import System.Posix.Types (ProcessID)
 import qualified System.Process as Proc
+
+-- | Shared list of shell builtin commands
+shellBuiltins :: [T.Text]
+shellBuiltins =
+  [ "cd",
+    "exit",
+    "export",
+    "unset",
+    "pwd",
+    "history",
+    "clear",
+    "source",
+    ".",
+    "type",
+    "which",
+    "echo",
+    "true",
+    "false",
+    "jobs"
+  ]
 
 exitCodeToInt :: Exit.ExitCode -> Int
 exitCodeToInt ec =
@@ -782,6 +804,8 @@ runHistory = do
   setLastExit Exit.ExitSuccess
 
 -- | source - execute commands from a file
+-- Executes each line in the current shell context so exports/cd persist.
+-- Note: Aliases are not expanded in sourced files.
 runSource :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
 runSource args = do
   case args of
@@ -798,48 +822,52 @@ runSource args = do
           liftIO $ hPutShellError ("source: " <> T.pack expandedPath <> ": No such file")
           setLastExit (Exit.ExitFailure 1)
         else do
-          content <- liftIO $ TIO.readFile expandedPath
-          let lns = filter (not . T.null) (map stripComments (T.lines content))
-          -- Note: We can't execute these inline without access to runOne
-          -- For now, just delegate to sh
-          liftIO $ mapM_ (\l -> Proc.callCommand (T.unpack l)) lns
-          setLastExit Exit.ExitSuccess
+          contentResult <- liftIO $ try (TIO.readFile expandedPath)
+          case contentResult of
+            Left (e :: IOException) -> do
+              liftIO $ hPutShellError ("source: " <> T.pack (show e))
+              setLastExit (Exit.ExitFailure 1)
+            Right content -> do
+              let lns = filter (not . T.null) (map stripComments (T.lines content))
+              -- Execute each line in the current shell context
+              mapM_ executeSourceLine lns
   where
     stripComments t = T.strip (T.takeWhile (/= '#') t)
+
+    executeSourceLine lineText = do
+      case parsePipeline lineText of
+        Left err -> do
+          when (err /= "empty") $ do
+            liftIO $ hPutShellError ("source: parse error: " <> T.pack err)
+            setLastExit (Exit.ExitFailure 2)
+        Right pipeline -> runPipeline Map.empty pipeline
 
 -- | type - describe a command
 runType :: (MonadIO m) => [T.Text] -> StateT ShellState m ()
 runType args = do
   st <- get
   let envMap = effectiveEnvMap st
-  let builtins =
-        [ "cd",
-          "exit",
-          "export",
-          "unset",
-          "pwd",
-          "history",
-          "clear",
-          "source",
-          ".",
-          "type",
-          "which",
-          "echo",
-          "true",
-          "false",
-          "jobs"
-        ]
-  mapM_ (checkCmd envMap builtins) args
-  setLastExit Exit.ExitSuccess
+  -- Use the shared shellBuiltins constant
+  results <- mapM (checkCmd envMap) args
+  -- Set exit status based on whether all commands were found
+  if and results
+    then setLastExit Exit.ExitSuccess
+    else setLastExit (Exit.ExitFailure 1)
   where
-    checkCmd envMap builtins cmd = do
-      if cmd `elem` builtins
-        then liftIO $ TIO.putStrLn (cmd <> " is a shell builtin")
+    checkCmd envMap cmd = do
+      if cmd `elem` shellBuiltins
+        then do
+          liftIO $ TIO.putStrLn (cmd <> " is a shell builtin")
+          pure True
         else do
           mPath <- liftIO $ findExecutable envMap (T.unpack cmd)
           case mPath of
-            Just p -> liftIO $ TIO.putStrLn (cmd <> " is " <> T.pack p)
-            Nothing -> liftIO $ TIO.putStrLn (cmd <> " not found")
+            Just p -> do
+              liftIO $ TIO.putStrLn (cmd <> " is " <> T.pack p)
+              pure True
+            Nothing -> do
+              liftIO $ TIO.putStrLn (cmd <> " not found")
+              pure False
 
 -- | which - find executable
 runWhich :: (MonadIO m) => [T.Text] -> StateT ShellState m ()

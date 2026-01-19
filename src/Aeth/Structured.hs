@@ -22,7 +22,6 @@ import Control.Exception (IOException, try)
 import Data.Char (isDigit, toLower)
 import Data.Int (Int64)
 import qualified Data.List as List
-import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -285,7 +284,7 @@ lsStructured opts dirPath0 = do
 
     sortByColumn idx rs rev =
       let sorted = List.sortBy (\a b -> compare (parseNum (a !! idx)) (parseNum (b !! idx))) rs
-       in if rev then sorted else reverse sorted
+       in if rev then reverse sorted else sorted
 
     parseNum t = fromMaybe 0 (parseSizeBytes t)
 
@@ -448,9 +447,21 @@ selectStructured cols v =
     STable headers rows -> do
       let colNames = map (T.strip . T.dropWhile (== '.')) cols
       indices <- mapM (\c -> maybe (Left ("select: unknown column: " <> c)) Right (List.elemIndex c headers)) colNames
-      let newHeaders = map (headers !!) indices
-          newRows = map (\r -> map (r !!) indices) rows
-      pure (STable newHeaders newRows)
+      -- Validate all rows have enough columns
+      let requiredMaxIndex = if null indices then 0 else maximum indices
+      case findShortRow requiredMaxIndex 0 rows of
+        Just (rowNum, rowLen) ->
+          Left ("select: row " <> T.pack (show rowNum) <> " too short (has " <> T.pack (show rowLen) <> " columns, need " <> T.pack (show (requiredMaxIndex + 1)) <> ")")
+        Nothing -> do
+          let newHeaders = map (headers !!) indices
+              newRows = map (\r -> map (r !!) indices) rows
+          pure (STable newHeaders newRows)
+  where
+    findShortRow :: Int -> Int -> [[T.Text]] -> Maybe (Int, Int)
+    findShortRow _ _ [] = Nothing
+    findShortRow maxIdx rowNum (r : rs)
+      | length r <= maxIdx = Just (rowNum, length r)
+      | otherwise = findShortRow maxIdx (rowNum + 1) rs
 
 expandTilde :: FilePath -> IO FilePath
 expandTilde p

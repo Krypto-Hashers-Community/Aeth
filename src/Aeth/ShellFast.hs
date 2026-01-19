@@ -76,7 +76,11 @@ runCommandLine line = do
   initialCwd <- Dir.getCurrentDirectory
   env0 <- Env.getEnvironment
   let st0 = emptyShellState initialCwd (Map.fromList env0)
-  (cfg, _) <- loadConfig
+  (cfg, errs) <- loadConfig
+  -- Surface config errors to stderr
+  case errs of
+    Just err -> TIO.hPutStrLn stderr ("Aeth: config: " <> T.pack err)
+    Nothing -> pure ()
   evalStateT (runOne cfg (T.pack line)) st0
 
 -- | Install signal handlers

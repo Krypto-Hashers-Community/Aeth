@@ -6,7 +6,10 @@ This guide explains how to customize Aeth.
 
 ```bash
 mkdir -p ~/.config/Aeth
+# From the Aeth repository root:
 cp config/config.toml ~/.config/Aeth/config.toml
+# Or from an installed location:
+# cp /usr/share/Aeth/config.toml ~/.config/Aeth/config.toml
 ```
 
 ## Configuration Files
@@ -161,6 +164,17 @@ export PATH="$HOME/bin:$PATH"
 **Operators:** `==`, `!=`, `>`, `>=`, `<`, `<=`, `contains`
 
 **Size units:** `B`, `KB`, `MB`, `GB`
+
+### @env Options
+
+The `@env` command outputs structured data with environment variables.
+
+**Fields:** `.Variable`, `.Value`
+
+```bash
+@env                                      # List all environment variables
+@env | filter { .Variable contains PATH } # Filter variables by name
+```
 
 ### Sort and Select
 

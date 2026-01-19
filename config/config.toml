@@ -23,7 +23,8 @@ error_color = "red"
 success_color = "green"
 
 # Security
-safe_mode = false
+# Restricts potentially dangerous operations (see docs/SECURITY.md)
+safe_mode = true
 
 # History
 history_size = 10000
