@@ -39,7 +39,7 @@ else ifeq ($(DISTRO),fedora)
 else ifeq ($(DISTRO),centos)
     DEPS_CMD := sudo dnf check-update || true; sudo dnf install -y @development-tools ghc cabal-install ncurses-devel
 else ifeq ($(DISTRO),gentoo)
-    DEPS_CMD := sudo emerge --ask dev-lang/ghc dev-haskell/cabal-install sys-libs/ncurses
+    DEPS_CMD := sudo emerge --noreplace dev-lang/ghc dev-haskell/cabal-install sys-libs/ncurses
 else ifeq ($(DISTRO),nixos)
     DEPS_CMD := @echo "NixOS detected. For NixOS, it's recommended to define a Nix expression for your project."; \
                 echo "This Makefile will not attempt to install system dependencies via Nix."; \
@@ -73,6 +73,8 @@ deps:
 	$(DEPS_CMD)
 	@echo "Updating cabal package list..."
 	cabal update
+	@echo "Installing vty-unix..."
+	cabal install --lib vty-unix
 
 build:
 	@echo "Building $(PROJECT_NAME)..."
