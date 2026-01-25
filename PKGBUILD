@@ -1,6 +1,6 @@
 # Maintainer: prabinpanta0 <me@prabinpanta.com.np>
 pkgname=aeth-git
-pkgver=r18.4e704c6
+pkgver=r21.a99d56d
 pkgrel=1
 pkgdesc="An elegant polymorphic shell that lacks the concept of elegance. Written in Haskell."
 arch=('x86_64')
@@ -31,17 +31,30 @@ build() {
 
   cabal update
   
-  # Prevent cabal from using Arch's broken dynamic-only system libraries for static builds
-  # We hide problematic packages so cabal identifies them as missing and rebuilds them statically from source
-  GHC_ARGS="-hide-package hashable -hide-package random -hide-package text -hide-package primitive -hide-package vector"
-  
+  # Force cabal to ignore system dynamic libraries and build static versions from source
+  # This fixes "Could not find module" errors for static builds on Arch Linux where global packages are dynamic-only
+  # We do NOT include 'text' here as it is a boot library and static versions should be provided by ghc-static
+  local constraints=(
+    --constraint "hashable source"
+    --constraint "random source"
+    --constraint "os-string source"
+    --constraint "splitmix source"
+    --constraint "primitive source"
+    --constraint "vector source"
+    --constraint "scientific source"
+    --constraint "unordered-containers source"
+    --constraint "case-insensitive source"
+    --constraint "async source"
+    --constraint "split source"
+  )
+
   # Build with optimization and stripping
   # --disable-shared --enable-static ensures we build static libraries for dependencies
   cabal build --enable-executable-stripping \
               --enable-split-sections \
               --disable-shared \
               --enable-static \
-              --ghc-options="$GHC_ARGS"
+              "${constraints[@]}"
 }
 
 package() {
@@ -50,8 +63,14 @@ package() {
   # Specify HOME again just in case makefile invokes cabal and needs it
   export HOME="$srcdir/home"
 
-  # Install using the project's Makefile
-  make install DESTDIR="$pkgdir" PREFIX=/usr
+  # Install the pre-built executable (do not rebuild during package())
+  local binpath
+  binpath="$(find dist-newstyle -type f -path '*/build/Aeth/Aeth' -print -quit)"
+  if [[ -z "$binpath" ]]; then
+    echo "ERROR: built executable not found under dist-newstyle" >&2
+    return 1
+  fi
+  install -Dm755 "$binpath" "$pkgdir/usr/bin/aeth"
 
   # Install License (Mandatory for Arch)
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

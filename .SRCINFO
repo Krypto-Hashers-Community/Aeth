@@ -1,6 +1,6 @@
 pkgbase = aeth-git
 	pkgdesc = An elegant polymorphic shell that lacks the concept of elegance. Written in Haskell.
-	pkgver = r18.4e704c6
+	pkgver = r21.a99d56d
 	pkgrel = 1
 	url = https://github.com/prabinpanta0/Aeth
 	arch = x86_64
