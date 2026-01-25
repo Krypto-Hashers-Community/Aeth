@@ -2,13 +2,13 @@
 
 A hybrid Linux shell written in Haskell that bridges traditional text-based shells with modern structured data.
 
--   **Version:** 0.2.0
--   **License:** [MIT](LICENSE)
+- **Version:** 0.2.0
+- **License:** [MIT](LICENSE)
 
 Aeth is a polymorphic shell that supports both traditional Unix commands and structured data operations:
 
--   **Raw Mode:** `ls` returns text (traditional shell behavior)
--   **Structured Mode:** `@ls` returns structured data (tables with columns)
+- **Raw Mode:** `ls` returns text (traditional shell behavior)
+- **Structured Mode:** `@ls` returns structured data (tables with columns)
 
 ---
 
@@ -16,15 +16,15 @@ Aeth is a polymorphic shell that supports both traditional Unix commands and str
 
 ### Core Shell
 
--   Fast startup (~25ms)
--   Process management via fork/exec
--   Path resolution through `$PATH`
--   Piping and I/O redirection
--   Environment variable expansion
--   Tab completion for commands and paths
--   Command history with up/down arrow navigation
--   Signal handling (Ctrl+C, Ctrl+D)
--   Proper quoting support
+- Fast startup (~25ms)
+- Process management via fork/exec
+- Path resolution through `$PATH`
+- Piping and I/O redirection
+- Environment variable expansion
+- Tab completion for commands and paths
+- Command history with up/down arrow navigation
+- Signal handling (Ctrl+C, Ctrl+D)
+- Proper quoting support
 
 ### Built-in Commands
 
@@ -72,6 +72,9 @@ Example:
 @ls | filter { .size > 1MB }
 @ls | filter { .kind == dir }
 @ps | filter { .%CPU > 1 }
+@ls | filter { .permissions == rw-r--r-- }
+@ls | filter { .name contains "dist" }
+@find | filter { .path contains "dist" }
 ```
 
 ### Configurable Prompt
@@ -136,8 +139,8 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
 
 ## Documentation
 
--   [Configuration Guide](docs/CONFIGURATION.md)
--   [Architecture Overview](docs/ARCHITECTURE.md)
+- [Configuration Guide](docs/CONFIGURATION.md)
+- [Architecture Overview](docs/ARCHITECTURE.md)
 
 ---
 
@@ -145,24 +148,24 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
 
 ### Completed
 
--   Fast startup (~25ms)
--   Tab completion
--   Proper quoting support
--   Environment variable expansion
--   Signal handling
--   Configurable prompts
--   Command history with arrow navigation
--   Visual file/directory distinction
--   Structured commands (@ls, @ps, @df, @env, @find)
--   Structured transformations (filter, sort, select)
--   Command aliases
+- Fast startup (~25ms)
+- Tab completion
+- Proper quoting support
+- Environment variable expansion
+- Signal handling
+- Configurable prompts
+- Command history with arrow navigation
+- Visual file/directory distinction
+- Structured commands (@ls, @ps, @df, @env, @find)
+- Structured transformations (filter, sort, select)
+- Command aliases
 
 ### Planned
 
--   Full I/O redirection
--   Job control (fg, bg)
--   Syntax highlighting
--   Auto-suggestions
+- Full I/O redirection
+- Job control (fg, bg)
+- Syntax highlighting
+- Auto-suggestions
 
 ---
 

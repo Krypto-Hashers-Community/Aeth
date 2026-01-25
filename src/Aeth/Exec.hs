@@ -10,9 +10,8 @@ where
 import Aeth.Parse (parsePipeline)
 import Aeth.Structured
 import Aeth.Types
-import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, SomeException, try)
-import Control.Monad (forM, when)
+import Control.Exception (IOException, try)
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (StateT, get, put)
 import qualified Data.List as List
@@ -24,8 +23,6 @@ import qualified System.Directory as Dir
 import qualified System.Exit as Exit
 import qualified System.FilePath as FP
 import System.IO (hClose, stderr)
-import System.Posix.Process (executeFile, forkProcess, getProcessStatus)
-import System.Posix.Types (ProcessID)
 import qualified System.Process as Proc
 
 -- | Shared list of shell builtin commands
@@ -109,20 +106,26 @@ runSingleCapture seg =
       pure (renderStructured v)
     RawString -> runRawSingleCapture seg
 
+-- | Check if a segment should be treated as structured, either explicitly (@cmd)
+-- or implicitly (e.g. filter, select).
+isStructuredSegment :: Segment -> Bool
+isStructuredSegment s =
+  segMode s == Structured || segName s `elem` ["filter", "select", "sort"]
+
 runMulti :: (MonadIO m) => [Segment] -> StateT ShellState m ()
 runMulti segs = do
   -- Minimal rule for now:
   -- - Structured pipelines can feed into raw pipelines by rendering structured output to stdin.
   -- - Fully-structured pipelines are not implemented yet.
   -- - Raw pipelines are executed via /bin/sh -c for correctness (quoting, redirects).
-  let anyStructured = any ((== Structured) . segMode) segs
+  let anyStructured = any isStructuredSegment segs
   if not anyStructured
     then do
       let cmdline = renderRawSegments segs
       runViaSh cmdline
     else case segs of
       (s0 : _)
-        | segMode s0 == Structured -> do
+        | segMode s0 == Structured || segName s0 `elem` ["filter", "select", "sort"] -> do
             let (structuredHead, rawTail) = splitStructuredHead segs
             (v, ec) <- runStructuredChain structuredHead
             setLastExit ec
@@ -134,7 +137,7 @@ runMulti segs = do
       _ ->
         liftIO $
           TIO.putStrLn
-            "structured pipelines require the first stage to be structured (start with @cmd)"
+            "Structured pipelines require the first stage to be structured (start with @cmd, e.g. @ls)"
 
 renderRawSegments :: [Segment] -> T.Text
 renderRawSegments segs =
@@ -146,7 +149,7 @@ renderRawSegments segs =
 
 runMultiCapture :: [Segment] -> StateT ShellState IO T.Text
 runMultiCapture segs = do
-  let anyStructured = any ((== Structured) . segMode) segs
+  let anyStructured = any isStructuredSegment segs
   if not anyStructured
     then do
       let cmdline = renderRawSegments segs
@@ -154,7 +157,7 @@ runMultiCapture segs = do
     else do
       case segs of
         (s0 : _)
-          | segMode s0 == Structured -> do
+          | segMode s0 == Structured || segName s0 `elem` ["filter", "select", "sort"] -> do
               let (structuredHead, rawTail) = splitStructuredHead segs
               (v, ec) <- runStructuredChain structuredHead
               setLastExit ec
@@ -164,7 +167,7 @@ runMultiCapture segs = do
                 then pure stdinText
                 else runViaShWithStdinCapture stdinText cmdline
         _ ->
-          pure "structured pipelines require the first stage to be structured (start with @cmd)"
+          pure "Structured pipelines require the first stage to be structured (start with @cmd, e.g. @ls)"
 
 splitStructuredHead :: [Segment] -> ([Segment], [Segment])
 splitStructuredHead = go True []
@@ -172,12 +175,11 @@ splitStructuredHead = go True []
     go _ acc [] = (reverse acc, [])
     go inStructured acc (s : rest)
       | inStructured && isStructuredTransformLike s = go True (asStructuredTransform s : acc) rest
-      | inStructured && segMode s == Structured = go True (s : acc) rest
       | otherwise = (reverse acc, s : rest)
 
 isStructuredTransformLike :: Segment -> Bool
 isStructuredTransformLike s =
-  segMode s == Structured || segName s == "filter"
+  segMode s == Structured || segName s `elem` ["filter", "select", "sort"]
 
 asStructuredTransform :: Segment -> Segment
 asStructuredTransform s =
@@ -298,7 +300,7 @@ runRawSingle seg = do
       "pwd" -> runPwd
       "history" -> runHistory
       "clear" -> liftIO $ do
-        putStr "\ESC[2J\ESC[H" -- ANSI clear screen
+        putStr "\ESC[H\ESC[2J\ESC[3J" -- ANSI clear screen + scrollback
       "source" -> runSource args
       "." -> runSource args -- POSIX alias for source
       "type" -> runType args
@@ -800,7 +802,7 @@ runHistory :: (MonadIO m) => StateT ShellState m ()
 runHistory = do
   st <- get
   let hist = history st
-  liftIO $ mapM_ (\(i, cmd) -> putStrLn $ show i ++ "  " ++ cmd) (zip [1 ..] hist)
+  liftIO $ mapM_ (\(i, cmd) -> putStrLn $ show i ++ "  " ++ cmd) (zip ([1 ..] :: [Int]) hist)
   setLastExit Exit.ExitSuccess
 
 -- | source - execute commands from a file

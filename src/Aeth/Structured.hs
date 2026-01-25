@@ -99,10 +99,14 @@ filterStructured rawExpr v =
     SText _ -> Left "filter: expected table input"
     STable headers rows -> do
       (field, op, lit) <- parsePredicate rawExpr
-      idx <- maybe (Left ("filter: unknown field: " <> field)) Right (List.elemIndex field headers)
+      -- Handle common aliases like permission -> permissions
+      let actualField = case field of
+            "permission" -> "permissions"
+            f -> f
+      idx <- maybe (Left ("filter: unknown field: " <> field)) Right (List.elemIndex actualField headers)
       let keepRow r =
             let cell = if idx < length r then r !! idx else ""
-             in evalPredicate field op lit cell
+             in evalPredicate actualField op lit cell
       pure (STable headers (filter keepRow rows))
 
 data Op = OpEq | OpNe | OpGt | OpGe | OpLt | OpLe | OpContains
@@ -136,24 +140,33 @@ parsePredicate expr0 =
         "contains" -> Right OpContains
         _ -> Left ("filter: unknown operator: " <> t)
 
+-- | Strip ANSI escape codes
+stripAnsi :: T.Text -> T.Text
+stripAnsi t =
+  let (before, match) = T.breakOn "\ESC[" t
+   in if T.null match
+        then before
+        else before <> stripAnsi (T.drop 1 (T.dropWhile (/= 'm') (T.drop 2 match)))
+
 evalPredicate :: T.Text -> Op -> T.Text -> T.Text -> Bool
-evalPredicate field op lit cell =
-  case field of
-    "size" ->
-      case (parseSizeBytes cell, parseSizeBytes lit) of
-        (Just a, Just b) -> cmpNum op a b
-        _ -> False
-    _ ->
-      let a = cell
-          b = stripQuotes (T.strip lit)
-       in case op of
-            OpEq -> a == b
-            OpNe -> a /= b
-            OpContains -> T.toCaseFold b `T.isInfixOf` T.toCaseFold a
-            OpGt -> a > b
-            OpGe -> a >= b
-            OpLt -> a < b
-            OpLe -> a <= b
+evalPredicate field op lit cellRaw =
+  let cell = stripAnsi cellRaw
+   in case field of
+        "size" ->
+          case (parseSizeBytes cell, parseSizeBytes lit) of
+            (Just a, Just b) -> cmpNum op a b
+            _ -> False
+        _ ->
+          let a = cell
+              b = stripQuotes (T.strip lit)
+           in case op of
+                OpEq -> a == b
+                OpNe -> a /= b
+                OpContains -> T.toCaseFold b `T.isInfixOf` T.toCaseFold a
+                OpGt -> a > b
+                OpGe -> a >= b
+                OpLt -> a < b
+                OpLe -> a <= b
   where
     stripQuotes t =
       case (T.uncons t, T.unsnoc t) of
@@ -174,12 +187,12 @@ cmpNum op a b =
 
 parseSizeBytes :: T.Text -> Maybe Int64
 parseSizeBytes t0 =
-  let t = T.strip t0
-      (numTxt, unitTxt) = T.span (\c -> isDigit c) t
-   in case reads (T.unpack numTxt) :: [(Int64, String)] of
+  let t = stripAnsi (T.strip t0)
+      (numTxt, unitTxt) = T.span (\c -> isDigit c || c == '.') t
+   in case reads (T.unpack numTxt) :: [(Double, String)] of
         [(n, "")] ->
           let unit = map toLower (T.unpack (T.strip unitTxt))
-           in Just (n * unitMultiplier unit)
+           in Just (floor (n * fromIntegral (unitMultiplier unit)))
         _ -> Nothing
 
 unitMultiplier :: String -> Int64
@@ -215,10 +228,10 @@ renderStructured v =
     padTo n rs = map (\r -> take n (r ++ repeat "")) rs
 
     colWidths :: [[T.Text]] -> [Int]
-    colWidths cols = map (maximum . map T.length) cols
+    colWidths cols = map (maximum . map (T.length . stripAnsi)) cols
 
     pad :: Int -> T.Text -> T.Text
-    pad w t = t <> T.replicate (w - T.length t) " "
+    pad w t = t <> T.replicate (w - T.length (stripAnsi t)) " "
 
 -- | Format file size for display (human readable)
 formatSize :: Int64 -> T.Text
@@ -229,9 +242,10 @@ formatSize bytes
   | otherwise = T.pack $ show bytes <> "B"
 
 -- | Add visual indicator for file type
-formatKind :: Bool -> String -> T.Text
-formatKind isDir name
-  | isDir = T.pack name <> "/" -- Append / to directories
+formatKind :: Bool -> Bool -> String -> T.Text
+formatKind isDir isExec name
+  | isDir = "\ESC[1;34m" <> T.pack name <> "/" <> "\ESC[0m" -- Bold Blue for directories
+  | isExec = "\ESC[1;32m" <> T.pack name <> "*" <> "\ESC[0m" -- Bold Green for executables
   | otherwise = T.pack name
 
 lsStructured :: LsOptions -> FilePath -> IO StructuredValue
@@ -263,7 +277,7 @@ lsStructured opts dirPath0 = do
           -- On error, produce a row with error indicators
           isDirResult <- try (Dir.doesDirectoryExist fullPath) :: IO (Either IOException Bool)
           let isDir = either (const False) id isDirResult
-              displayName = formatKind isDir n <> " [error]"
+              displayName = formatKind isDir False n <> " [error]"
           pure (Right [displayName, "-", "-", "-", "0"])
         Right st -> do
           isDir <- Dir.doesDirectoryExist fullPath
@@ -271,7 +285,8 @@ lsStructured opts dirPath0 = do
               sz = Posix.fileSize st
               sizeStr = if lsHumanReadable opts then formatSize (fromIntegral sz) else T.pack (show sz)
               perms = formatPermissions (Posix.fileMode st)
-              displayName = formatKind isDir n
+              isExec = not isDir && (Posix.ownerExecuteMode `Posix.intersectFileModes` (Posix.fileMode st) /= Posix.nullFileMode)
+              displayName = formatKind isDir isExec n
               -- Store mtime as epoch seconds for sorting (hidden column)
               mtime = Posix.modificationTime st
               mtimeStr = T.pack (show mtime)
@@ -434,9 +449,10 @@ sortStructured colExpr v =
   case v of
     SText _ -> Left "sort: expected table input"
     STable headers rows -> do
-      let col = T.strip $ T.dropWhile (== '.') colExpr
+      let colRaw = T.strip $ T.dropWhile (== '.') colExpr
+          col = if colRaw == "permission" then "permissions" else colRaw
       idx <- maybe (Left ("sort: unknown column: " <> col)) Right (List.elemIndex col headers)
-      let sorted = List.sortBy (\a b -> compare (a !! idx) (b !! idx)) rows
+      let sorted = List.sortBy (\a b -> compare (stripAnsi (a !! idx)) (stripAnsi (b !! idx))) rows
       pure (STable headers sorted)
 
 -- | select - select specific columns
@@ -445,7 +461,8 @@ selectStructured cols v =
   case v of
     SText _ -> Left "select: expected table input"
     STable headers rows -> do
-      let colNames = map (T.strip . T.dropWhile (== '.')) cols
+      let resolveName n = if n == "permission" then "permissions" else n
+          colNames = map (resolveName . T.strip . T.dropWhile (== '.')) cols
       indices <- mapM (\c -> maybe (Left ("select: unknown column: " <> c)) Right (List.elemIndex c headers)) colNames
       -- Validate all rows have enough columns
       let requiredMaxIndex = if null indices then 0 else maximum indices
