@@ -42,3 +42,13 @@ dist-newstyle/
 *.tmp
 *.bak
 aeth
+
+# Arch Packaging
+*.pkg.tar.zst
+*.pkg.tar.xz
+pkg/
+src/aeth-git/
+src/home/
+src/Aeth.git/
+*.src.tar.gz
+*.log
