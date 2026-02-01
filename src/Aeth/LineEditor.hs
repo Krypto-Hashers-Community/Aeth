@@ -68,7 +68,7 @@ getLineEdited _ settings _scrollback prompt history0 =
   where
     -- Newest-first history for navigation.
     history = reverse history0
-    
+
     -- Helper to get suggestion (respects autoSuggestions setting)
     getSuggestion buf
       | leAutoSuggestions settings = suggestion buf history
